@@ -253,9 +253,38 @@ HCURSOR WINAPI setcursor_hook(HCURSOR c)
 }
 
 
+// DIAG (cursor mode, 2026-11-06): who in the game shows / hides the cursor: the call stack as offsets into the exe
+// (+RVA), other modules by name. To find the game's input-mode switch (cursor vs camera).
+std::string stack_text()
+{
+    void* frames[16] = {};
+    USHORT n = CaptureStackBackTrace(1, 16, frames, nullptr);
+    static const std::uintptr_t exe = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
+    std::string out;
+    char b[64];
+    for (USHORT i = 0; i < n; ++i) {
+        HMODULE mod = nullptr;
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           static_cast<LPCWSTR>(frames[i]), &mod);
+        std::uintptr_t a = reinterpret_cast<std::uintptr_t>(frames[i]);
+        if (reinterpret_cast<std::uintptr_t>(mod) == exe) {
+            std::snprintf(b, sizeof b, " +%llX", static_cast<unsigned long long>(a - exe));
+        } else {
+            wchar_t name[MAX_PATH] = L"?";
+            if (mod) GetModuleFileNameW(mod, name, MAX_PATH);
+            const wchar_t* base = wcsrchr(name, L'\\');
+            std::snprintf(b, sizeof b, " %ls+%llX", base ? base + 1 : name,
+                          static_cast<unsigned long long>(a - reinterpret_cast<std::uintptr_t>(mod)));
+        }
+        out += b;
+    }
+    return out;
+}
+
 int WINAPI showcursor_hook(BOOL show)
 {
     int n = g_showcursor_orig(show);
+    if (!t_own) LOG("DIAG ShowCursor(%s) -> %d from%s", show ? "TRUE" : "FALSE", n, stack_text().c_str());
     if (t_own) return n;
     static const HCURSOR wait = LoadCursorW(nullptr, IDC_WAIT), starting = LoadCursorW(nullptr, IDC_APPSTARTING);
     HCURSOR last = g_last_set.load();
@@ -284,7 +313,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v3 started");
+    LOG("Borderless Lock v3 (cursor-mode DIAG) started");
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
         LOG("MinHook failed: inactive");
         return 0;
