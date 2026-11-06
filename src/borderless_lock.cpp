@@ -218,15 +218,33 @@ bool read_ptr(UPTR a, UPTR& out)
     }
 }
 
+std::atomic<bool> g_kick{false}; // a load's release was overridden: move the input layer to gameplay (0) once
+constexpr size_t kOffLayerFlags = 0x3A; // 7 flags, one per layer: the first one set is the layer
+
 void __fastcall input_hook(UPTR self)
 {
+    if (g_kick.exchange(false)) {
+        std::uint8_t layer = 0xFF, f[7] = {};
+        read_u8(self + kOffLayer, layer);
+        for (int i = 0; i < 7; ++i) read_u8(self + kOffLayerFlags + i, f[i]);
+        LOG("DIAG input layer %u, flags %u %u %u %u %u %u %u", layer, f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
+        if (layer == 1) {
+            __try {
+                *reinterpret_cast<volatile std::uint8_t*>(self + kOffLayerFlags) = 1;
+                LOG("input layer set to gameplay (0) after the load, as Kliff's first step does");
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+            }
+        }
+    }
     g_input_orig(self);
     g_input = self;
     std::uint8_t layer = 0xFF, flag = 0, released = 0, cfg_on = 0;
     if (!read_u8(self + kOffLayer, layer)) return;
     static int last_layer = -2;
     if (layer != last_layer) {
-        LOG("DIAG input layer %d -> %u", last_layer, layer);
+        std::uint8_t f[7] = {};
+        for (int i = 0; i < 7; ++i) read_u8(self + 0x3A + i, f[i]);
+        LOG("DIAG input layer %d -> %u (flags %u %u %u %u %u %u %u)", last_layer, layer, f[0], f[1], f[2], f[3], f[4], f[5], f[6]);
         last_layer = layer;
         if (g_block_layer.load() >= 0 && g_block_layer.load() != layer) g_block_layer = -1; // (the layer changed)
     }
@@ -244,7 +262,10 @@ void __fastcall input_hook(UPTR self)
     if (g_block_layer.load() == layer) return;
     g_mouse = ctrl;
     bool focused = false;
-    if (call_capture(ctrl, focused) && focused) LOG("camera mode restored (gameplay input layer %u, the mouse was free)", layer);
+    if (call_capture(ctrl, focused) && focused) {
+        LOG("camera mode restored (gameplay input layer %u, the mouse was free)", layer);
+        if (layer == 1) g_kick = true; // (the next frame: from the UI pointer layer to gameplay)
+    }
 }
 
 // --- the window procedure -------------------------------------------------------------------------------------------
@@ -274,14 +295,15 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     case WM_SETCURSOR: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
-        if (LOWORD(l) == HTCLIENT && borderless(h)) { // (the game left it to Windows: the arrow went up)
-            if (HCURSOR gc = g_game_cursor.load()) {
-                t_own = true;
-                SetCursor(gc);
-                t_own = false;
-                if (++g_replaced % 500 == 1)
-                    LOG("the Windows arrow replaced by the game's cursor (%u times so far)", g_replaced.load());
-            }
+        HCURSOR gc = g_game_cursor.load();
+        // (the game left it to Windows: the arrow went up. Before the game has a cursor of its own - the title menu
+        // uses the plain arrow - Windows' answer stays, v8)
+        if (gc && LOWORD(l) == HTCLIENT && borderless(h)) {
+            t_own = true;
+            SetCursor(gc);
+            t_own = false;
+            if (++g_replaced % 500 == 1)
+                LOG("the Windows arrow replaced by the game's cursor (%u times so far)", g_replaced.load());
             r = TRUE;
         }
         return r;
@@ -436,7 +458,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v7 started");
+    LOG("Borderless Lock v8 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
