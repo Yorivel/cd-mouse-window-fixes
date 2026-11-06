@@ -16,6 +16,12 @@
 //    holds that release (a patch that changes the object turns this part off, nothing else).
 //    The game's ShowCursor count is left alone (v7: clamping it broke the title menu's cursor, which the game shows
 //    with counts above 0); its own capture skips itself once the mouse is captured, so ours can't stack.
+// 5. v12, mapped with the user's F10 markers: the world is input layer 4, its menus too (the title is layer 1, the
+//    Esc menu 5). When the HUD appears, one function frees the mouse (the same one does for the title prompts and the
+//    Esc menu); the inventory and map free it through other code. The mod finds that function by its code (one
+//    match: it checks the global mouse flag, then the controller at [this+0x78]) and, when it frees the mouse in
+//    layer 4, captures it back on the next frame. And until the game frees the mouse for the first time (the title
+//    prompts appearing) there is no cursor over the game (the intro and the title art).
 //
 // Log: BorderlessLock.log next to it.
 
@@ -27,6 +33,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <intrin.h>
 #include <map>
 #include <mutex>
 #include <string>
@@ -122,6 +129,8 @@ UPTR g_release_addr = 0;      // the release function found by its code
 std::atomic<UPTR> g_mouse{0}; // the controller (seen in its release calls)
 int g_deactivating = 0;       // (window thread: inside the game's handling of losing focus)
 bool g_was_captured = false;  // the game was in camera mode when it lost focus
+UPTR g_hud_ret = 0;                     // the return address of the HUD's release call (see 5.)
+std::atomic<bool> g_freed_once{false};  // the game has freed the mouse itself at least once (the title prompts)
 std::atomic<UPTR> g_input{0}; // the game's input manager (its per-frame function's this; +0x30 the input layer)
 std::atomic<int> g_block_layer{-1}; // the game freed the mouse itself in this layer: not ours to capture (-1: none)
 constexpr size_t kOffLayer = 0x30;
@@ -139,6 +148,7 @@ bool read_u8(UPTR a, std::uint8_t& out)
 
 void __fastcall release_hook(UPTR obj, U64 pos)
 {
+    UPTR ret = reinterpret_cast<UPTR>(_ReturnAddress());
     std::uint8_t released = 1;
     read_u8(obj + kOffReleased, released);
     g_mouse = obj;
@@ -154,6 +164,11 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         g_block_layer = !capturing || repeated ? layer : -1;
         LOG("the game released the mouse itself (input layer %u)%s", layer,
             !capturing ? "" : repeated ? ": again and again, left free until the layer changes" : ": overridden");
+        g_freed_once = true;
+        if (g_hud_ret && ret == g_hud_ret && layer == 4 && g_main) { // (the HUD appearing in the world: see 5.)
+            LOG("  (the HUD appeared: camera mode back on the next frame)");
+            PostMessageW(g_main, kRecaptureMsg, 1, 0); // (after the caller has set its own released flag)
+        }
     }
     if (g_deactivating) {
         g_was_captured = released == 0;
@@ -348,6 +363,12 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     case WM_SETCURSOR: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
+        if (!g_freed_once.load() && LOWORD(l) == HTCLIENT && borderless(h)) { // (intro / title art: no cursor, v12)
+            t_own = true;
+            SetCursor(nullptr);
+            t_own = false;
+            return TRUE;
+        }
         HCURSOR gc = g_game_cursor.load();
         // (the game left it to Windows: the arrow went up. Before the game has a cursor of its own - the title menu
         // uses the plain arrow - Windows' answer stays, v8)
@@ -385,7 +406,7 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     default:
         if (m == kRecaptureMsg) {
-            if (w || g_was_captured) recapture(w ? "after a load" : "back in front");
+            if (w || g_was_captured) recapture(w ? "the HUD appeared" : "back in front");
             if (!w) g_was_captured = false;
             return 0;
         }
@@ -506,6 +527,46 @@ UPTR find_input()
     return start;
 }
 
+// cmp byte [rip+x],0; je rel32; mov rbx,[rcx+78]; cmp dword [rbx+28],0 at the function's start, and at +0x41
+// cmp byte [rbx+50],1; je; mov rax,[rbx]; mov rdx,-1; mov rcx,rbx; call [rax+48]; mov byte [rbx+50],1 (the call returns
+// 26 bytes in): one match in build 26480954.
+UPTR find_hud_release()
+{
+    const std::uint8_t a[] = {0x80, 0x3D, 0, 0, 0, 0, 0x00, 0x0F, 0x84, 0, 0, 0, 0, 0x48, 0x8B, 0x59, 0x78, 0x83, 0x7B, 0x28, 0x00};
+    const bool aw[] = {0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0};
+    const std::uint8_t b[] = {0x80, 0x7B, 0x50, 0x01, 0x0F, 0x84, 0, 0, 0, 0, 0x48, 0x8B, 0x03, 0x48, 0xC7, 0xC2, 0xFF,
+                              0xFF, 0xFF, 0xFF, 0x48, 0x8B, 0xCB, 0xFF, 0x50, 0x48, 0xC6, 0x43, 0x50, 0x01};
+    const bool bw[] = {0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    auto base = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    auto sec = IMAGE_FIRST_SECTION(nt);
+    UPTR hit = 0;
+    int hits = 0;
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        const std::uint8_t* p = base + sec->VirtualAddress;
+        size_t n = sec->Misc.VirtualSize;
+        __try {
+            for (size_t k = 0; k + 0x41 + sizeof b <= n; ++k) {
+                if (p[k] != 0x80) continue;
+                size_t j = 0;
+                while (j < sizeof a && (aw[j] || p[k + j] == a[j])) ++j;
+                if (j != sizeof a) continue;
+                j = 0;
+                while (j < sizeof b && (bw[j] || p[k + 0x41 + j] == b[j])) ++j;
+                if (j == sizeof b) hit = reinterpret_cast<UPTR>(p + k + 0x41 + 26), ++hits;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (hits != 1) {
+        LOG("the game's HUD mouse release: %d matches (need exactly one): that fix is off", hits);
+        return 0;
+    }
+    LOG("the game's HUD mouse release returns to +%llX", static_cast<unsigned long long>(hit - reinterpret_cast<UPTR>(base)));
+    return hit;
+}
+
 DWORD WINAPI init_thread(LPVOID)
 {
     wchar_t buf[MAX_PATH];
@@ -513,7 +574,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v11 (F10 markers) started");
+    LOG("Borderless Lock v12 (F10 markers) started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
@@ -531,6 +592,7 @@ DWORD WINAPI init_thread(LPVOID)
         LOG("the mouse release hook failed: cursor mode fix off");
         g_release_addr = 0;
     }
+    g_hud_ret = find_hud_release();
     if (UPTR f = find_input()) {
         if (MH_CreateHook(reinterpret_cast<void*>(f), &input_hook, reinterpret_cast<void**>(&g_input_orig)) != MH_OK)
             LOG("the input hook failed: the after-load fix is off");
