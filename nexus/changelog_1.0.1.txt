@@ -1,0 +1,6 @@
+- Scrolling in menus and radial wheels moves one step per notch again (1.0.0 scrolled twice).
+- One-notch zoom, fixed at the source: the camera only zoomed on the second of two wheel frames in quick succession; the mod now makes every wheel frame count, instead of sending an extra notch. Zooming is smoother and keeps up with fast scrolling.
+- Title screen: the cursor no longer disappears after an Alt+Tab while the prompts appear, no longer shows over the intro, and appears where the mouse is.
+- No Windows arrow flashing on rapid clicks.
+- The camera comes back after loading in even without an Alt+Tab first.
+- Alt+Tab with the inventory or map open keeps the menu cursor.

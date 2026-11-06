@@ -1,11 +1,12 @@
-// Mouse & Window Fixes for Crimson Desert (2026-11-06), 1.0.0. Keyboard and mouse in borderless window mode:
+// Mouse & Window Fixes for Crimson Desert (2026-11-06), 1.0.1. Keyboard and mouse in borderless window mode:
 //
 // 1. No accidental resize. The game's borderless window answers Windows' hit-test with an invisible resize border
 //    (about 8 px), and the cursor starts on its top-left corner: a click and drag there resized the window and the
 //    game dropped to windowed mode. While the window covers its monitor those answers become "client", and the system
 //    Size / Move commands are ignored. Windowed mode is untouched.
 // 2. No Windows arrow. The game never answers WM_SETCURSOR, so on clicks and at the screen's edges Windows put up its
-//    plain arrow. Once the world has loaded, the mod answers with the game's own cursor.
+//    plain arrow. Once the world has loaded, the mod answers with the game's own cursor - without passing the message on
+//    (passed on, Windows puts up the arrow at once and rapid clicks flashed it).
 // 3. Camera mode back at once. The game's mouse controller (an object: +0x40 its window, +0x48 / +0x4C the saved
 //    cursor spot, +0x50 1 = free / cursor mode, 0 = captured / camera mode; vtable slot 0x28 "focused", 0x40 capture,
 //    0x48 release) frees the mouse when the game loses focus and when the HUD appears after a load, and captures it
@@ -14,13 +15,23 @@
 //    one function, found by its code; menus free the mouse through other code and keep their cursor). The cursor
 //    image stays blank between that release and the capture (no flash). The game's per-frame input function (found by
 //    its capture rule, offsets read from the code) also gets the capture applied in gameplay layers 0, 1, 3, 5 while
-//    the mouse is free, unless the game freed it itself in that layer.
-// 4. The title cursor. No cursor until the title prompts appear; it then starts on the title logo's ring (the
-//    controller's saved spot is 0,0 until first used: set to the ring on the first release).
-// 5. Zoom with one wheel notch. The game zooms only on a second wheel event within a short window: a lone notch
-//    (none in the 400 ms before it) gets a second event 50 ms later, marked so it isn't doubled again.
+//    the mouse is free, unless the game freed it itself in that layer. The mod's messages go to the controller's own
+//    window (1.0.0 needed an Alt+Tab before the world for the HUD's capture). The function that frees the mouse for the
+//    HUD and the title prompts acts only while the game is focused and runs once: called while the game is out of focus,
+//    the mod keeps its choice (the cursor; camera mode only after a load that was in camera mode - a menu's cursor
+//    stays) and applies it on the first frame back in front.
+// 4. The title cursor. No cursor until the title prompts appear (the game's own cursor calls are blanked until then);
+//    it then starts on the title logo's ring (the controller's saved spot is 0,0 until first used: set to the ring on
+//    the first release); after an Alt+Tab it appears where the mouse is. No camera mode on the title (layer 1 before
+//    the world).
+// 5. Zoom with one wheel notch. The camera's distance code counts frames with wheel input (+1.0 each, whatever the
+//    delta), drains the count by the frame time and steps a zoom level only once it reaches a threshold (a global above
+//    one frame's worth): a lone notch never zoomed, a second one soon after did. The mod points that add at the
+//    threshold itself (one instruction's operand, found by its code), so each wheel frame steps one level; menus and
+//    everything else read the wheel as before.
 //
-// Every game address is found by searching the game's code at start-up (tools/bl_backtest.py checks a new exe); a
+// Every game address is found by searching the game's code at start-up (tools/bl_backtest.py and tools/zoom_backtest.py
+// check a new exe); a
 // search that fails switches off only its fix. Log: MouseWindowFixes.log next to the ASI.
 
 #include "log.h"
@@ -89,6 +100,16 @@ bool read_u8(UPTR a, std::uint8_t& out)
     }
 }
 
+bool read_u32(UPTR a, std::uint32_t& out)
+{
+    __try {
+        out = *reinterpret_cast<volatile std::uint32_t*>(a);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 bool read_ptr(UPTR a, UPTR& out)
 {
     __try {
@@ -106,8 +127,12 @@ thread_local bool t_own = false;             // (our own SetCursor: not the game
 std::atomic<HCURSOR> g_game_cursor{nullptr}; // the game's last own cursor (not the arrow, not none)
 std::atomic<HCURSOR> g_last_set{nullptr};    // the last cursor the game set (a load's end: the busy cursor)
 
+std::atomic<bool> g_freed_once{false}; // the game has freed the mouse itself (the title prompts)
+
 HCURSOR WINAPI setcursor_hook(HCURSOR c)
 {
+    if (!t_own && !g_freed_once.load()) // (the intro and the title art: no cursor until the game frees the mouse)
+        return g_setcursor_orig(nullptr);
     HCURSOR prev = g_setcursor_orig(c);
     if (t_own) return prev;
     static const HCURSOR arrow = LoadCursorW(nullptr, IDC_ARROW);
@@ -136,8 +161,9 @@ std::atomic<UPTR> g_mouse{0};          // the controller (seen in its release ca
 std::atomic<UPTR> g_input{0};          // the game's input manager (its per-frame function's object)
 size_t g_off_layer = 0x30;             // the input layer in it (read from the code: +0x28 in 1.0.0.2976)
 std::atomic<int> g_block_layer{-1};    // the game freed the mouse itself in this layer: not ours to capture
-std::atomic<bool> g_freed_once{false}; // the game has freed the mouse itself (the title prompts)
 std::atomic<bool> g_blank{false};      // between the HUD's release and our capture: no cursor image
+std::atomic<bool> g_world{false};      // the HUD has appeared in the world once (past the intro and the title)
+std::atomic<int> g_switch_pending{0};  // a mouse mode to apply once the game is in front: 1 cursor, 2 camera
 int g_deactivating = 0;                // (window thread: inside the game's handling of losing focus)
 bool g_was_captured = false;           // the game was in camera mode when it lost focus
 
@@ -161,6 +187,21 @@ void first_spot(UPTR obj)
     }
 }
 
+// The window to post the mod's messages to: the controller's own window (always known by now), else the one seen
+// activated while borderless (1.0.0 only had that: without an Alt+Tab before the world it could be unset, and the
+// HUD's camera fix never came).
+HWND post_window(UPTR obj)
+{
+    HWND w = nullptr;
+    __try {
+        w = *reinterpret_cast<HWND volatile*>(obj + kOffWindow);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        w = nullptr;
+    }
+    if (w && IsWindow(w) && orig_of(w)) return w;
+    return g_main;
+}
+
 void __fastcall release_hook(UPTR obj, U64 pos)
 {
     UPTR ret = reinterpret_cast<UPTR>(_ReturnAddress());
@@ -174,13 +215,15 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         if (UPTR in = g_input.load()) read_u8(in + g_off_layer, layer);
         g_block_layer = layer;
         g_freed_once = true;
-        if (g_hud_ret && ret == g_hud_ret && layer == 4 && g_main) { // (the HUD appearing in the world)
+        HWND pw = post_window(obj);
+        if (g_hud_ret && ret == g_hud_ret && layer == 4 && pw) { // (the HUD appearing in the world)
+            g_world = true;
             g_blank = true;
-            PostMessageW(g_main, kRecaptureMsg, 1, 0); // (after the caller has set its own released flag)
+            PostMessageW(pw, kRecaptureMsg, 1, 0); // (after the caller has set its own released flag)
         } else {
             static const HCURSOR wait = LoadCursorW(nullptr, IDC_WAIT), starting = LoadCursorW(nullptr, IDC_APPSTARTING);
             HCURSOR last = g_last_set.load();
-            if ((last == wait || last == starting) && g_main) PostMessageW(g_main, kRecaptureMsg, 1, 0); // (a load ended)
+            if ((last == wait || last == starting) && pw) PostMessageW(pw, kRecaptureMsg, 1, 0); // (a load ended)
         }
     }
     first_spot(obj);
@@ -204,6 +247,27 @@ bool call_capture(UPTR obj, bool& focused)
     }
 }
 
+// The controller's own release (through the hook: counted as the game's choice), the cursor left where it is (the
+// release puts it on the position it is given, in the window's client coordinates: x low, y high; -1 = the saved
+// spot). Only with the expected vtable.
+bool call_release(UPTR obj)
+{
+    __try {
+        UPTR* vt = *reinterpret_cast<UPTR**>(obj);
+        if (vt[kSlotRelease] != g_release_addr) return false;
+        U64 pos = ~0ull;
+        POINT pt{};
+        HWND w = *reinterpret_cast<HWND volatile*>(obj + kOffWindow);
+        if (IsWindow(w) && GetCursorPos(&pt) && ScreenToClient(w, &pt) && pt.x >= 0 && pt.y >= 0)
+            pos = static_cast<U64>(static_cast<std::uint32_t>(pt.x)) | (static_cast<U64>(static_cast<std::uint32_t>(pt.y)) << 32);
+        reinterpret_cast<MouseFn>(vt[kSlotRelease])(obj, pos);
+        *reinterpret_cast<volatile std::uint8_t*>(obj + kOffReleased) = 1;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
 void recapture(const char* why)
 {
     UPTR obj = g_mouse.load();
@@ -212,9 +276,56 @@ void recapture(const char* why)
     bool focused = false;
     if (!call_capture(obj, focused)) LOG("camera mode not restored (%s): unexpected mouse controller", why);
     else if (focused) LOG("camera mode restored (%s)", why);
+    else if (!g_switch_pending.load()) { // (the game's focus check lags a quick Alt+Tab: the input hook retries)
+        g_switch_pending = 2;
+        LOG("camera mode (%s): the game isn't focused yet, retried each frame", why);
+    }
 }
 
 // --- the game's per-frame input function ------------------------------------------------------------------------------
+// The game's cursor switch (the function holding the HUD's release; the title prompts and the HUD call it, not every
+// frame): with the controller's setting on ([[ctrl+0x20]+0x10]+0x138) it frees the mouse, else captures it - only while
+// the game is focused, and the release only if not free already. Called while the game is out of focus (the prompts
+// appearing behind another window) it does nothing, and nothing calls it again on return: the mod keeps what it
+// wanted (1 cursor, 2 camera) and applies it when the game is back in front. Window thread state: set on the game's.
+using SwitchFn = void(__fastcall*)(UPTR owner);
+SwitchFn g_switch_orig = nullptr;
+
+bool game_in_front()
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    return pid == GetCurrentProcessId();
+}
+
+void __fastcall switch_hook(UPTR owner)
+{
+    UPTR ctrl = 0, list = 0, cfg = 0;
+    std::uint8_t on = 0, layer = 0xFF;
+    std::uint32_t count = 0;
+    bool known = read_ptr(owner + 0x78, ctrl) && ctrl && read_u32(ctrl + 0x28, count) && count &&
+                 read_ptr(ctrl + 0x20, list) && read_ptr(list + 0x10, cfg) && read_u8(cfg + 0x138, on);
+    if (UPTR in = g_input.load()) read_u8(in + g_off_layer, layer);
+    if (known) g_mouse = ctrl; // (it may come before any release: the input hook applies its choice to this one)
+    if (known && on) { // (it wants the cursor: whether or not it skips the release, the game has freed it)
+        g_freed_once = true;
+        g_block_layer = layer; // (as its release would: the input fix doesn't take this layer's cursor away)
+        if (!game_in_front()) {
+            // (the HUD in the world gets camera mode, as when it appears in front: when the game was in camera mode
+            // as it lost focus - a load; with a menu open (layer 4 too, called every frame) it keeps the cursor)
+            int want = layer == 4 && g_was_captured ? 2 : 1;
+            if (want == 2) g_world = true;
+            if (g_switch_pending.exchange(want) != want)
+                LOG("the game wanted %s while out of focus (layer %u): applied when back in front",
+                    want == 2 ? "camera mode (the HUD after a load)" : "the cursor", layer);
+        }
+    } else if (known && !game_in_front()) {
+        if (g_switch_pending.exchange(2) != 2)
+            LOG("the game wanted camera mode while out of focus (layer %u): applied when back in front", layer);
+    }
+    g_switch_orig(owner);
+}
+
 using InputFn = void(__fastcall*)(UPTR self);
 InputFn g_input_orig = nullptr;
 UPTR g_input_flag = 0; // the global the function checks before handling the mouse
@@ -225,6 +336,24 @@ void __fastcall input_hook(UPTR self)
     g_input = self;
     std::uint8_t layer = 0xFF, flag = 0, released = 0, cfg_on = 0;
     if (!read_u8(self + g_off_layer, layer)) return;
+    if (int p = g_switch_pending.load(); p && game_in_front()) { // (the switch's choice made while out of focus)
+        g_switch_pending = 0;
+        UPTR c = g_mouse.load();
+        std::uint8_t rel = 0;
+        bool focused = false;
+        static int tries = 0;
+        if (c && read_u8(c + kOffReleased, rel)) {
+            if (p == 1 && !rel && call_release(c)) LOG("the cursor shown, as the game chose while out of focus");
+            if (p == 2 && rel && call_capture(c, focused)) {
+                if (focused) LOG("camera mode restored (after %d frames)", tries);
+                else if (++tries < 600) g_switch_pending.compare_exchange_strong(p = 0, 2); // (not focused yet: next frame)
+                else LOG("camera mode not restored: the game stayed unfocused for 600 frames");
+            }
+        }
+        if (!g_switch_pending.load()) tries = 0;
+        return;
+    }
+    if (!g_world.load() && layer == 1) return; // (the intro and the title, layer 1 before the world: the game's own choice)
     static int last_layer = -2;
     if (layer != last_layer) {
         last_layer = layer;
@@ -248,9 +377,6 @@ void __fastcall input_hook(UPTR self)
 }
 
 // --- the window procedure -------------------------------------------------------------------------------------------
-constexpr ULONG_PTR kWheelMark = 0x4D57464Cu; // (the mod's own wheel events)
-constexpr UINT_PTR kWheelTimer = 0x4C42;
-SHORT g_wheel_pending = 0;
 
 LRESULT CALLBACK fix_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
@@ -276,8 +402,11 @@ LRESULT CALLBACK fix_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         break;
     }
     case WM_SETCURSOR: {
-        LRESULT r = CallWindowProcW(orig, h, m, w, l);
-        if (LOWORD(l) != HTCLIENT || !borderless(h)) return r;
+        // (the game never answers it: passed on, Windows puts up the window's arrow at once, so with an answer of the
+        // mod's own the message isn't passed on - else rapid clicks flash the arrow before the mod's cursor)
+        if (LOWORD(l) != HTCLIENT || !borderless(h)) return CallWindowProcW(orig, h, m, w, l);
+        bool own = !g_freed_once.load() || g_blank.load() || (g_game_cursor.load() && g_input.load());
+        LRESULT r = own ? TRUE : CallWindowProcW(orig, h, m, w, l);
         if (!g_freed_once.load() || g_blank.load()) { // (the intro and the title art; between the HUD's release and ours)
             set_cursor_own(nullptr);
             return TRUE;
@@ -296,6 +425,7 @@ LRESULT CALLBACK fix_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         bool losing = (m == WM_ACTIVATE && LOWORD(w) == WA_INACTIVE) || (m == WM_ACTIVATEAPP && !w) || m == WM_KILLFOCUS;
         if (m == WM_ACTIVATE && !losing) {
             if (borderless(h)) g_main = h;
+            if (g_switch_pending.load()) g_was_captured = false; // (the game's choice made while away: the input hook)
             if (g_was_captured) PostMessageW(h, kRecaptureMsg, 0, 0); // (after the activation has gone through)
         }
         if (!losing) break;
@@ -304,30 +434,6 @@ LRESULT CALLBACK fix_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         --g_deactivating;
         return r;
     }
-    case WM_MOUSEWHEEL: {
-        static ULONGLONG last = 0;
-        ULONGLONG now = GetTickCount64();
-        if (GetMessageExtraInfo() != static_cast<LPARAM>(kWheelMark)) {
-            if (now - last > 400 && borderless(h)) { // (a lone notch: its second event, a few frames later)
-                g_wheel_pending = static_cast<SHORT>(HIWORD(w));
-                SetTimer(h, kWheelTimer, 50, nullptr);
-            }
-            last = now;
-        }
-        break;
-    }
-    case WM_TIMER:
-        if (w == kWheelTimer) {
-            KillTimer(h, kWheelTimer);
-            INPUT in{};
-            in.type = INPUT_MOUSE;
-            in.mi.dwFlags = MOUSEEVENTF_WHEEL;
-            in.mi.mouseData = static_cast<DWORD>(static_cast<int>(g_wheel_pending));
-            in.mi.dwExtraInfo = kWheelMark;
-            SendInput(1, &in, sizeof in);
-            return 0;
-        }
-        break;
     case WM_NCDESTROY: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
         std::lock_guard<std::mutex> lock(g_mu);
@@ -449,6 +555,52 @@ UPTR find_hud_release()
     return hit;
 }
 
+// The camera's zoom counter: vmovss xmm0,[rsi+C]; vaddss xmm1,xmm0,[rip+one]; vmovss [rsi+C],xmm1; vmovss xmm0,[rsi+C];
+// vcomiss xmm0,[rip+threshold]; jb (C the same in all three; one match on every build kept from 2026-10-30 to
+// 26480954, tools/zoom_backtest.py). The add's operand is pointed at the threshold: each wheel frame reaches it.
+void patch_zoom()
+{
+    const std::uint8_t a[] = {0xC5, 0xFA, 0x10, 0x86}, b[] = {0xC5, 0xFA, 0x58, 0x0D}, c[] = {0xC5, 0xFA, 0x11, 0x8E},
+                       e[] = {0xC5, 0xF8, 0x2F, 0x05}, f[] = {0x0F, 0x82};
+    std::uint8_t* hit = nullptr;
+    int hits = 0;
+    each_code_section([&](const std::uint8_t* p, size_t n) {
+        __try {
+            for (size_t k = 0; k + 42 <= n; ++k) {
+                const std::uint8_t* q = p + k;
+                if (q[0] != 0xC5 || std::memcmp(q, a, 4) || std::memcmp(q + 8, b, 4) || std::memcmp(q + 16, c, 4) ||
+                    std::memcmp(q + 24, a, 4) || std::memcmp(q + 32, e, 4) || std::memcmp(q + 40, f, 2))
+                    continue;
+                if (std::memcmp(q + 4, q + 20, 4) || std::memcmp(q + 4, q + 28, 4)) continue;
+                hit = const_cast<std::uint8_t*>(q);
+                ++hits;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    });
+    if (hits != 1) {
+        LOG("the camera's zoom counter: %d matches (need one): zoom with one notch is off", hits);
+        return;
+    }
+    std::uint8_t* add = hit + 8;                 // (the vaddss; its disp32 at +4, relative to its end at +8)
+    std::uint8_t* cmp = hit + 32;                // (the vcomiss)
+    std::int32_t dcmp = 0;
+    std::memcpy(&dcmp, cmp + 4, 4);
+    const std::uint8_t* thr = cmp + 8 + dcmp;    // (the threshold global)
+    std::int64_t nd = reinterpret_cast<std::intptr_t>(thr) - reinterpret_cast<std::intptr_t>(add + 8);
+    DWORD old = 0;
+    if (nd != static_cast<std::int32_t>(nd) || !VirtualProtect(add + 4, 4, PAGE_EXECUTE_READWRITE, &old)) {
+        LOG("the camera's zoom counter at +%llX: not patched", rva(reinterpret_cast<UPTR>(add)));
+        return;
+    }
+    std::int32_t d32 = static_cast<std::int32_t>(nd);
+    std::memcpy(add + 4, &d32, 4);
+    VirtualProtect(add + 4, 4, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), add, 8);
+    LOG("the camera's zoom counter at +%llX: each wheel frame adds the threshold (+%llX) now: one notch, one zoom step",
+        rva(reinterpret_cast<UPTR>(add)), rva(reinterpret_cast<UPTR>(thr)));
+}
+
 // The input function: anchored on its capture rule, mov ecx,0x2B; bt ecx,r32 (the capturing layers: one match on every
 // build kept), with the layer's offset and the mouse-handling global read from the code before it (cmp byte
 // [rbx+d8],r8b; jne short; cmp byte [rbx+d8+2],r8b, then cmp byte [rip+x],0). Its start from the exception table.
@@ -503,7 +655,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"MouseWindowFixes.log").c_str());
-    LOG("Mouse & Window Fixes 1.0.0 started");
+    LOG("Mouse & Window Fixes 1.0.1 started");
     g_exe = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
@@ -521,10 +673,19 @@ DWORD WINAPI init_thread(LPVOID)
     }
     if (g_release_addr) {
         g_hud_ret = find_hud_release();
+        if (g_hud_ret) {
+            // (its function: 10 bytes before the anchor, mov [rsp+8],rbx; push rdi; sub rsp,60 on every build kept)
+            const std::uint8_t pro[] = {0x48, 0x89, 0x5C, 0x24, 0x08, 0x57, 0x48, 0x83, 0xEC, 0x60};
+            UPTR f = g_hud_ret - 26 - 0x41 - 10;
+            if (std::memcmp(reinterpret_cast<const void*>(f), pro, sizeof pro) != 0 ||
+                MH_CreateHook(reinterpret_cast<void*>(f), &switch_hook, reinterpret_cast<void**>(&g_switch_orig)) != MH_OK)
+                LOG("the cursor switch hook failed: the cursor after Alt+Tab on the title is off");
+        }
         if (UPTR f = find_input())
             if (MH_CreateHook(reinterpret_cast<void*>(f), &input_hook, reinterpret_cast<void**>(&g_input_orig)) != MH_OK)
                 LOG("the input hook failed: the camera fix in gameplay is off");
     }
+    patch_zoom();
     ok &= MH_EnableHook(MH_ALL_HOOKS) == MH_OK;
     LOG("hooks: %s", ok ? "in" : "FAILED (inactive)");
     EnumWindows(&wrap_existing, 0); // (a window made before the hooks went in)

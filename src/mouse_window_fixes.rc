@@ -1,8 +1,8 @@
 // Version stamp of MouseWindowFixes.asi (Properties > Details in Explorer).
 #include <winver.h>
 
-#define MWF_VERSION 1, 0, 0, 0
-#define MWF_VERSION_STR "1.0.0"
+#define MWF_VERSION 1, 0, 1, 0
+#define MWF_VERSION_STR "1.0.1"
 
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION MWF_VERSION
