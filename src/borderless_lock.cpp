@@ -16,6 +16,11 @@
 //    holds that release (a patch that changes the object turns this part off, nothing else).
 //    ShowCursor's count is kept between -1 (hidden) and 0 (shown), so the game's own capture after ours can't hide
 //    the cursor twice and keep it hidden in the next menu.
+// 4. Loads (v5): the game captures the mouse only when its input layer CHANGES to a gameplay one (its per-frame input
+//    function: layers 0, 1, 3, 5 capture), so after loading into the world (the mouse free from the title menus, the
+//    layer already gameplay) it stayed free until Kliff moved. The mod hooks that function (found by its code) and
+//    applies the same rule as a state: gameplay layer + focused + mouse free -> capture. Unless the game itself freed
+//    the mouse in that layer (not by losing focus): then it waits until the layer changes or the game captures again.
 //
 // Log: BorderlessLock.log next to it.
 
@@ -114,6 +119,9 @@ UPTR g_release_addr = 0;      // the release function found by its code
 std::atomic<UPTR> g_mouse{0}; // the controller (seen in its release calls)
 int g_deactivating = 0;       // (window thread: inside the game's handling of losing focus)
 bool g_was_captured = false;  // the game was in camera mode when it lost focus
+std::atomic<UPTR> g_input{0}; // the game's input manager (its per-frame function's this; +0x30 the input layer)
+std::atomic<int> g_block_layer{-1}; // the game freed the mouse itself in this layer: not ours to capture (-1: none)
+constexpr size_t kOffLayer = 0x30;
 constexpr UINT kRecaptureMsg = WM_APP + 0x4C42; // (posted to the main window: back to camera mode; wParam 1 = a load)
 
 bool read_u8(UPTR a, std::uint8_t& out)
@@ -131,6 +139,12 @@ void __fastcall release_hook(UPTR obj, U64 pos)
     std::uint8_t released = 1;
     read_u8(obj + kOffReleased, released);
     g_mouse = obj;
+    if (!g_deactivating) { // (the game's own choice, a menu or a load: respected while its layer lasts)
+        std::uint8_t layer = 0xFF;
+        if (UPTR in = g_input.load()) read_u8(in + kOffLayer, layer);
+        g_block_layer = layer;
+        LOG("DIAG the game released the mouse itself (input layer %u)", layer);
+    }
     if (g_deactivating) {
         g_was_captured = released == 0;
         LOG("the game released the mouse (lost focus; it was in %s mode)", released ? "cursor" : "camera");
@@ -177,6 +191,50 @@ void recapture(const char* why)
     }
     if (focused) LOG("camera mode restored (%s)", why);
     else LOG("camera mode not restored (%s): the game isn't focused yet", why);
+}
+
+// --- loads: the game's per-frame input function -------------------------------------------------------------------
+using InputFn = void(__fastcall*)(UPTR self);
+InputFn g_input_orig = nullptr;
+UPTR g_input_flag = 0; // the global the function checks before handling the mouse (cmp byte [rip+x],0)
+
+bool read_ptr(UPTR a, UPTR& out)
+{
+    __try {
+        out = *reinterpret_cast<volatile UPTR*>(a);
+        return out > 0x10000 && out < 0x7FFFFFFF0000ull;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void __fastcall input_hook(UPTR self)
+{
+    g_input_orig(self);
+    g_input = self;
+    std::uint8_t layer = 0xFF, flag = 0, released = 0, cfg_on = 0;
+    if (!read_u8(self + kOffLayer, layer)) return;
+    static int last_layer = -2;
+    if (layer != last_layer) {
+        LOG("DIAG input layer %d -> %u", last_layer, layer);
+        last_layer = layer;
+        if (g_block_layer.load() >= 0 && g_block_layer.load() != layer) g_block_layer = -1; // (the layer changed)
+    }
+    if (layer > 5 || !((0x2B >> layer) & 1)) return; // (not a capturing layer)
+    UPTR a = 0, b = 0, ctrl = 0, list = 0, cfg = 0;
+    // as the game reads it: [[self+8]+0x78] -> [+0] -> the controller at +0x78; its setting at [[ctrl+0x20]+0x10]+0x138
+    if (!read_u8(g_input_flag, flag) || !flag || !read_ptr(self + 8, a) || !read_ptr(a + 0x78, b) || !read_ptr(b, b) ||
+        !read_ptr(b + 0x78, ctrl) || !read_ptr(ctrl + 0x20, list) || !read_ptr(list + 0x10, cfg) ||
+        !read_u8(cfg + 0x138, cfg_on) || !cfg_on || !read_u8(ctrl + kOffReleased, released))
+        return;
+    if (!released) {
+        g_block_layer = -1; // (captured: the game's own release no longer stands)
+        return;
+    }
+    if (g_block_layer.load() == layer) return;
+    g_mouse = ctrl;
+    bool focused = false;
+    if (call_capture(ctrl, focused) && focused) LOG("camera mode restored (gameplay input layer %u, the mouse was free)", layer);
 }
 
 // --- the window procedure -------------------------------------------------------------------------------------------
@@ -319,6 +377,48 @@ UPTR find_release()
     return found;
 }
 
+// cmp [rbx+30],r14b; jne +a; cmp [rbx+32],r15b; je rel32; cmp byte [rip+x],0 - one match (build 26480954), inside
+// the input function; its start from the exception table, checked against its prologue.
+UPTR find_input()
+{
+    auto base = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    auto sec = IMAGE_FIRST_SECTION(nt);
+    const std::uint8_t pat[] = {0x44, 0x38, 0x73, 0x30, 0x75, 0, 0x44, 0x38, 0x7B, 0x32, 0x0F, 0x84, 0, 0, 0, 0, 0x80, 0x3D};
+    const bool any[] = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0};
+    UPTR hit = 0;
+    int hits = 0;
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
+        if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        const std::uint8_t* p = base + sec->VirtualAddress;
+        size_t n = sec->Misc.VirtualSize;
+        __try {
+            for (size_t k = 0; k + sizeof pat <= n; ++k) {
+                if (p[k] != 0x44) continue;
+                size_t j = 0;
+                while (j < sizeof pat && (any[j] || p[k + j] == pat[j])) ++j;
+                if (j == sizeof pat) hit = reinterpret_cast<UPTR>(p + k), ++hits;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    if (hits != 1) {
+        LOG("the game's input layer code: %d matches (need exactly one): the after-load fix is off", hits);
+        return 0;
+    }
+    DWORD64 image = 0;
+    auto fe = RtlLookupFunctionEntry(hit, &image, nullptr);
+    const std::uint8_t prologue[] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57};
+    UPTR start = fe ? static_cast<UPTR>(image + fe->BeginAddress) : 0;
+    if (!start || std::memcmp(reinterpret_cast<void*>(start), prologue, sizeof prologue) != 0) {
+        LOG("the game's input function: unexpected start: the after-load fix is off");
+        return 0;
+    }
+    g_input_flag = hit + 16 + 7 + *reinterpret_cast<const std::int32_t*>(hit + 18); // (cmp byte [rip+x],0: 7 bytes)
+    LOG("the game's input function at +%llX", static_cast<unsigned long long>(start - reinterpret_cast<UPTR>(base)));
+    return start;
+}
+
 DWORD WINAPI init_thread(LPVOID)
 {
     wchar_t buf[MAX_PATH];
@@ -326,7 +426,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v4 started");
+    LOG("Borderless Lock v5 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
@@ -343,6 +443,10 @@ DWORD WINAPI init_thread(LPVOID)
                       reinterpret_cast<void**>(&g_release_orig)) != MH_OK) {
         LOG("the mouse release hook failed: cursor mode fix off");
         g_release_addr = 0;
+    }
+    if (UPTR f = find_input()) {
+        if (MH_CreateHook(reinterpret_cast<void*>(f), &input_hook, reinterpret_cast<void**>(&g_input_orig)) != MH_OK)
+            LOG("the input hook failed: the after-load fix is off");
     }
     ok &= MH_EnableHook(MH_ALL_HOOKS) == MH_OK;
     LOG("hooks: %s", ok ? "in" : "FAILED (inactive)");
