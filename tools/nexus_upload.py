@@ -14,12 +14,12 @@ import json, os, re, sys, time, urllib.error, urllib.request
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 API = 'https://api.nexusmods.com/v3'
 GAME, MOD_ID = 'crimsondesert', '4112'
+# the file description: its card (nexus/make_cards.py, redraw for each version and push before uploading)
+CARD = '[center][img]https://raw.githubusercontent.com/Yorivel/cd-mouse-window-fixes/main/nexus/out/%s[/img][/center]'
 # zip suffix -> (file name on Nexus, category for a new file, the Mod Manager Download default, file description)
 FILES = {
-    '': ('Mouse and Window Fixes', 'main', True,
-         'The mod: MouseWindowFixes.asi, with its licences. Add it to DMM as an ASI mod, or put it in bin64.'),
-    '-source': ('Mouse and Window Fixes - Source code', 'miscellaneous', False,
-                'The source code (C++, CMake). Also on GitHub: https://github.com/Yorivel/cd-mouse-window-fixes'),
+    '': ('Mouse and Window Fixes', 'main', True, CARD % 'file_main_990x200.png'),
+    '-source': ('Mouse and Window Fixes - Source code', 'miscellaneous', False, CARD % 'file_source_990x200.png'),
 }
 
 
