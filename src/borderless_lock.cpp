@@ -1,14 +1,23 @@
-// Borderless Lock (Crimson Desert, 2026-11-06): the game's borderless window answers Windows' hit-test with an invisible
-// resize border (about 8 px: top-left corner 13, left edge 10, top 12, bottom-right 17), and the cursor starts on that
-// corner. A click-and-drag there starts a real resize and the game drops to windowed mode. While the window covers its
-// monitor, those answers become "client" and the system Size / Move commands are ignored; windowed mode is untouched.
+// Borderless Lock (Crimson Desert, 2026-11-06), v4.
 //
-// The cursor (v1, from v0's log): the game never answers WM_SETCURSOR, so on every click / move Windows puts up the
-// window's default arrow until the game's next SetCursor covers it (right clicks in menus: until release; the outer
-// strip of the screen: always). Over the game's own area the mod answers it with the game's last cursor. And the game
-// shows its cursor when it loses focus and at the end of a load, and stays in cursor mode (the mouse moves a cursor,
-// not the camera) until Kliff moves. That is the game's own input state: hiding the cursor (v2) only made it
-// invisible and stuck it hidden in menus, so the mod leaves showing / hiding to the game. (rehide() is unused.)
+// 1. Resize: the game's borderless window answers Windows' hit-test with an invisible resize border (about 8 px: the
+//    top-left corner 13, left edge 10, top 12, bottom-right 17), and the cursor starts on that corner; a click and drag
+//    there resized the window and the game dropped to windowed mode. While the window covers its monitor those answers
+//    become "client", and the system Size / Move commands are ignored. Windowed mode is untouched.
+// 2. The arrow: the game never answers WM_SETCURSOR, so on every click / move Windows put up the window's default
+//    arrow until the game's next SetCursor covered it (right clicks in menus: until release; the outer strip of the
+//    screen: always). Over the game the mod answers it with the game's last own cursor.
+// 3. Cursor mode: the game's mouse controller (an object: +0x40 the window, +0x50 1 = released / cursor mode,
+//    0 = captured / camera mode; vtable slot 0x28 "focused", 0x40 capture(pos), 0x48 release(pos)) releases the mouse
+//    when the game loses focus and when a load ends, and captures it again only when Kliff moves: until then the
+//    mouse drove a cursor, not the camera. The mod finds release by its code (one match in build 26480954), hooks it,
+//    and after the game comes back in front (if it was in camera mode when it lost focus) or after a load, calls the
+//    object's own capture, as the game does when Kliff moves. Before each call it checks the object's vtable still
+//    holds that release (a patch that changes the object turns this part off, nothing else).
+//    ShowCursor's count is kept between -1 (hidden) and 0 (shown), so the game's own capture after ours can't hide
+//    the cursor twice and keep it hidden in the next menu.
+//
+// Log: BorderlessLock.log next to it.
 
 #include "log.h"
 
@@ -17,19 +26,21 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
-#include <set>
 #include <string>
 
 namespace {
 
-using U32 = std::uint32_t;
+using U64 = std::uint64_t;
+using UPTR = std::uintptr_t;
 HMODULE g_self = nullptr;
 
-// --- the game's windows -------------------------------------------------------------------------------------------
+// --- the game's windows ---------------------------------------------------------------------------------------------
 std::mutex g_mu;
 std::map<HWND, WNDPROC> g_orig; // windows we wrap -> their previous window procedure
+HWND g_main = nullptr;          // the game's main window (borderless when it was activated)
 
 WNDPROC orig_of(HWND h)
 {
@@ -52,8 +63,6 @@ bool borderless(HWND h)
 const char* hit_name(LRESULT ht)
 {
     switch (ht) {
-    case HTCLIENT: return "client";
-    case HTCAPTION: return "caption";
     case HTLEFT: return "left edge";
     case HTRIGHT: return "right edge";
     case HTTOP: return "top edge";
@@ -62,63 +71,115 @@ const char* hit_name(LRESULT ht)
     case HTBOTTOM: return "bottom edge";
     case HTBOTTOMLEFT: return "bottom-left corner";
     case HTBOTTOMRIGHT: return "bottom-right corner";
-    case HTNOWHERE: return "nowhere";
     default: return "other";
     }
 }
 
-const char* mouse_msg_name(UINT m)
-{
-    switch (m) {
-    case WM_MOUSEMOVE: return "move";
-    case WM_LBUTTONDOWN: return "left down";
-    case WM_LBUTTONUP: return "left up";
-    case WM_RBUTTONDOWN: return "right down";
-    case WM_RBUTTONUP: return "right up";
-    case WM_MBUTTONDOWN: return "middle down";
-    case WM_MBUTTONUP: return "middle up";
-    case 0: return "none (asked without a mouse message)";
-    default: return "other";
-    }
-}
-
-std::string cursor_name(HCURSOR c)
-{
-    static const HCURSOR arrow = LoadCursorW(nullptr, IDC_ARROW);
-    if (!c) return "none";
-    if (c == arrow) return "Windows arrow";
-    char b[32];
-    std::snprintf(b, sizeof b, "%p", static_cast<void*>(c));
-    return b;
-}
-
-thread_local bool t_in_setcursor = false; // (the game's SetCursor calls made while it answers WM_SETCURSOR)
-thread_local bool t_own = false;           // (our own SetCursor: not the game's choice)
-std::string g_last_setcursor_line;         // DIAG: the last WM_SETCURSOR line logged (only changes are logged)
+// --- the cursor -----------------------------------------------------------------------------------------------------
+using SetCursorFn = HCURSOR(WINAPI*)(HCURSOR);
+using ShowCursorFn = int(WINAPI*)(BOOL);
+SetCursorFn g_setcursor_orig = nullptr;
+ShowCursorFn g_showcursor_orig = nullptr;
+thread_local bool t_own = false;             // (our own SetCursor: not the game's choice)
 std::atomic<HCURSOR> g_game_cursor{nullptr}; // the game's last own cursor (not the arrow, not none)
-std::atomic<U32> g_replaced{0};              // arrows replaced (logged now and then)
-constexpr UINT kRehideMsg = WM_APP + 0x4C42; // (posted to the window: hide the cursor again once it is in front)
-bool g_hidden_before = false;                // the cursor was hidden when the game lost focus (gameplay)
-HWND g_main = nullptr;                       // the game's main window (borderless when it was activated)
+std::atomic<HCURSOR> g_last_set{nullptr};    // the last cursor the game set (a load's end: the busy cursor)
+std::atomic<unsigned> g_replaced{0};
 
-bool cursor_showing()
+HCURSOR WINAPI setcursor_hook(HCURSOR c)
 {
-    CURSORINFO ci{sizeof ci};
-    return GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING);
+    HCURSOR prev = g_setcursor_orig(c);
+    if (t_own) return prev;
+    static const HCURSOR arrow = LoadCursorW(nullptr, IDC_ARROW);
+    if (c && c != arrow) g_game_cursor = c;
+    g_last_set = c;
+    return prev;
 }
 
-// The cursor hidden again, as the game does when Kliff moves (only while the game is in front and borderless).
-void rehide(HWND h, const char* why)
+int WINAPI showcursor_hook(BOOL show)
 {
-    DWORD pid = 0;
-    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    if (pid != GetCurrentProcessId() || !borderless(h) || !cursor_showing()) return;
-    t_own = true;
-    int n = ShowCursor(FALSE);
-    t_own = false;
-    LOG("cursor hidden again (%s): count %d", why, n);
+    int n = g_showcursor_orig(show);
+    // (kept between -1 hidden and 0 shown: a second capture or release must not stack)
+    if (n > 0) n = g_showcursor_orig(FALSE);
+    else if (n < -1) n = g_showcursor_orig(TRUE);
+    return n;
 }
 
+// --- cursor mode: the game's mouse controller -----------------------------------------------------------------------
+using MouseFn = void(__fastcall*)(UPTR obj, U64 pos);
+using FocusedFn = bool(__fastcall*)(UPTR obj);
+constexpr size_t kOffReleased = 0x50;
+constexpr size_t kSlotFocused = 0x28 / 8, kSlotCapture = 0x40 / 8, kSlotRelease = 0x48 / 8;
+MouseFn g_release_orig = nullptr;
+UPTR g_release_addr = 0;      // the release function found by its code
+std::atomic<UPTR> g_mouse{0}; // the controller (seen in its release calls)
+int g_deactivating = 0;       // (window thread: inside the game's handling of losing focus)
+bool g_was_captured = false;  // the game was in camera mode when it lost focus
+constexpr UINT kRecaptureMsg = WM_APP + 0x4C42; // (posted to the main window: back to camera mode; wParam 1 = a load)
+
+bool read_u8(UPTR a, std::uint8_t& out)
+{
+    __try {
+        out = *reinterpret_cast<volatile std::uint8_t*>(a);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void __fastcall release_hook(UPTR obj, U64 pos)
+{
+    std::uint8_t released = 1;
+    read_u8(obj + kOffReleased, released);
+    g_mouse = obj;
+    if (g_deactivating) {
+        g_was_captured = released == 0;
+        LOG("the game released the mouse (lost focus; it was in %s mode)", released ? "cursor" : "camera");
+    } else {
+        static const HCURSOR wait = LoadCursorW(nullptr, IDC_WAIT), starting = LoadCursorW(nullptr, IDC_APPSTARTING);
+        HCURSOR last = g_last_set.load();
+        if (last == wait || last == starting) { // (a load ended: the busy cursor, then the release)
+            LOG("the game released the mouse at a load's end");
+            if (g_main) PostMessageW(g_main, kRecaptureMsg, 1, 0);
+        }
+    }
+    g_release_orig(obj, pos);
+}
+
+// Calls the controller's own checks and capture, as the game does when Kliff moves. Only with the expected vtable.
+bool call_capture(UPTR obj, bool& focused)
+{
+    __try {
+        UPTR* vt = *reinterpret_cast<UPTR**>(obj);
+        if (vt[kSlotRelease] != g_release_addr) return false;
+        focused = reinterpret_cast<FocusedFn>(vt[kSlotFocused])(obj);
+        if (!focused) return true;
+        reinterpret_cast<MouseFn>(vt[kSlotCapture])(obj, ~0ull); // (-1: the window's centre, as the game passes)
+        *reinterpret_cast<volatile std::uint8_t*>(obj + kOffReleased) = 0;
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+void recapture(const char* why)
+{
+    UPTR obj = g_mouse.load();
+    std::uint8_t released = 0;
+    if (!obj || !read_u8(obj + kOffReleased, released)) {
+        LOG("camera mode not restored (%s): the mouse controller isn't known yet", why);
+        return;
+    }
+    if (!released) return; // (already in camera mode)
+    bool focused = false;
+    if (!call_capture(obj, focused)) {
+        LOG("camera mode not restored (%s): the mouse controller isn't the expected one (a game update?)", why);
+        return;
+    }
+    if (focused) LOG("camera mode restored (%s)", why);
+    else LOG("camera mode not restored (%s): the game isn't focused yet", why);
+}
+
+// --- the window procedure -------------------------------------------------------------------------------------------
 LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     WNDPROC orig = orig_of(h);
@@ -144,77 +205,64 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         break;
     }
     case WM_SETCURSOR: {
-        t_in_setcursor = true;
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
-        t_in_setcursor = false;
         if (LOWORD(l) == HTCLIENT && borderless(h)) { // (the game left it to Windows: the arrow went up)
             if (HCURSOR gc = g_game_cursor.load()) {
                 t_own = true;
                 SetCursor(gc);
                 t_own = false;
-                if (++g_replaced % 200 == 1) LOG("the Windows arrow replaced by the game's cursor (%u times so far)",
-                                                 g_replaced.load());
+                if (++g_replaced % 500 == 1)
+                    LOG("the Windows arrow replaced by the game's cursor (%u times so far)", g_replaced.load());
             }
             r = TRUE;
         }
-        CURSORINFO ci{sizeof ci};
-        GetCursorInfo(&ci);
-        char line[200];
-        std::snprintf(line, sizeof line, "WM_SETCURSOR over %s on %s: the game %s; cursor %s, %s",
-                      hit_name(static_cast<short>(LOWORD(l))), mouse_msg_name(HIWORD(l)),
-                      r ? "set it (returned TRUE)" : "left it to Windows", cursor_name(ci.hCursor).c_str(),
-                      (ci.flags & CURSOR_SHOWING) ? "showing" : "hidden");
-        if (g_last_setcursor_line != line) LOG("%s", line);
-        g_last_setcursor_line = line;
         return r;
     }
     case WM_ACTIVATE:
-        if (LOWORD(w) != WA_INACTIVE && borderless(h)) g_main = h;
-        if (LOWORD(w) == WA_INACTIVE) g_hidden_before = !cursor_showing(); // (before the game shows it)
-        LOG("window %s%s", LOWORD(w) == WA_INACTIVE ? "deactivated" : "activated",
-            LOWORD(w) == WA_INACTIVE ? (g_hidden_before ? " (cursor was hidden: gameplay)" : " (cursor was showing)") : "");
-        break;
     case WM_ACTIVATEAPP:
-        LOG("game %s", w ? "in front" : "in the background");
-        break;
-    default:
-        if (m == kRehideMsg) {
-            if (w || g_hidden_before) rehide(h, w ? "after a load" : "back in front in gameplay");
-            if (!w) g_hidden_before = false;
-            return 0;
+    case WM_KILLFOCUS: {
+        bool losing = (m == WM_ACTIVATE && LOWORD(w) == WA_INACTIVE) || (m == WM_ACTIVATEAPP && !w) || m == WM_KILLFOCUS;
+        if (m == WM_ACTIVATE && !losing) {
+            if (borderless(h)) g_main = h;
+            if (g_was_captured) PostMessageW(h, kRecaptureMsg, 0, 0); // (after the activation has gone through)
         }
-        break;
+        if (!losing) break;
+        ++g_deactivating;
+        LRESULT r = CallWindowProcW(orig, h, m, w, l);
+        --g_deactivating;
+        return r;
+    }
     case WM_NCDESTROY: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
         std::lock_guard<std::mutex> lock(g_mu);
         g_orig.erase(h);
         return r;
     }
+    default:
+        if (m == kRecaptureMsg) {
+            if (w || g_was_captured) recapture(w ? "after a load" : "back in front");
+            if (!w) g_was_captured = false;
+            return 0;
+        }
+        break;
     }
     return CallWindowProcW(orig, h, m, w, l);
 }
 
 void wrap(HWND h, const char* why)
 {
-    if (!h || GetParent(h)) return;
+    if (!h || GetParent(h) || (GetWindowLongW(h, GWL_STYLE) & WS_CHILD)) return;
     {
         std::lock_guard<std::mutex> lock(g_mu);
         if (g_orig.count(h)) return;
-    }
-    wchar_t cls[128] = L"";
-    GetClassNameW(h, cls, 128);
-    LONG style = GetWindowLongW(h, GWL_STYLE);
-    if (style & WS_CHILD) return;
-    WNDPROC prev = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(h, GWLP_WNDPROC));
-    {
-        std::lock_guard<std::mutex> lock(g_mu);
-        g_orig[h] = prev;
+        g_orig[h] = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(h, GWLP_WNDPROC));
     }
     SetWindowLongPtrW(h, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(&lock_proc));
-    LOG("wrapped window %p (%s, class %ls, style %08lX)", static_cast<void*>(h), why, cls, static_cast<unsigned long>(style));
+    wchar_t cls[128] = L"";
+    GetClassNameW(h, cls, 128);
+    LOG("wrapped window %p (%s, class %ls)", static_cast<void*>(h), why, cls);
 }
 
-// --- the game's top-level windows as they are created -------------------------------------------------------------
 using CreateWindowExWFn = HWND(WINAPI*)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
 CreateWindowExWFn g_create_orig = nullptr;
 
@@ -226,84 +274,49 @@ HWND WINAPI create_hook(DWORD ex, LPCWSTR cls, LPCWSTR name, DWORD style, int x,
     return wnd;
 }
 
-// --- DIAG (v0): the game's own cursor calls -------------------------------------------------------------------------
-using SetCursorFn = HCURSOR(WINAPI*)(HCURSOR);
-using ShowCursorFn = int(WINAPI*)(BOOL);
-SetCursorFn g_setcursor_orig = nullptr;
-ShowCursorFn g_showcursor_orig = nullptr;
-std::atomic<HCURSOR> g_last_set{reinterpret_cast<HCURSOR>(~0ull)};
-
-std::mutex g_seen_mu;
-std::set<HCURSOR> g_seen; // DIAG: cursor handles the game has set (each logged once)
-
-HCURSOR WINAPI setcursor_hook(HCURSOR c)
-{
-    HCURSOR prev = g_setcursor_orig(c);
-    if (t_own) return prev;
-    static const HCURSOR arrow = LoadCursorW(nullptr, IDC_ARROW);
-    if (c && c != arrow) g_game_cursor = c;
-    g_last_set = c;
-    bool fresh;
-    {
-        std::lock_guard<std::mutex> lock(g_seen_mu);
-        fresh = g_seen.insert(c).second;
-    }
-    if (fresh) LOG("the game set cursor %s for the first time", cursor_name(c).c_str());
-    return prev;
-}
-
-
-// DIAG (cursor mode, 2026-11-06): who in the game shows / hides the cursor: the call stack as offsets into the exe
-// (+RVA), other modules by name. To find the game's input-mode switch (cursor vs camera).
-std::string stack_text()
-{
-    void* frames[16] = {};
-    USHORT n = CaptureStackBackTrace(1, 16, frames, nullptr);
-    static const std::uintptr_t exe = reinterpret_cast<std::uintptr_t>(GetModuleHandleW(nullptr));
-    std::string out;
-    char b[64];
-    for (USHORT i = 0; i < n; ++i) {
-        HMODULE mod = nullptr;
-        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           static_cast<LPCWSTR>(frames[i]), &mod);
-        std::uintptr_t a = reinterpret_cast<std::uintptr_t>(frames[i]);
-        if (reinterpret_cast<std::uintptr_t>(mod) == exe) {
-            std::snprintf(b, sizeof b, " +%llX", static_cast<unsigned long long>(a - exe));
-        } else {
-            wchar_t name[MAX_PATH] = L"?";
-            if (mod) GetModuleFileNameW(mod, name, MAX_PATH);
-            const wchar_t* base = wcsrchr(name, L'\\');
-            std::snprintf(b, sizeof b, " %ls+%llX", base ? base + 1 : name,
-                          static_cast<unsigned long long>(a - reinterpret_cast<std::uintptr_t>(mod)));
-        }
-        out += b;
-    }
-    return out;
-}
-
-int WINAPI showcursor_hook(BOOL show)
-{
-    int n = g_showcursor_orig(show);
-    if (!t_own) LOG("DIAG ShowCursor(%s) -> %d from%s", show ? "TRUE" : "FALSE", n, stack_text().c_str());
-    if (t_own) return n;
-    static const HCURSOR wait = LoadCursorW(nullptr, IDC_WAIT), starting = LoadCursorW(nullptr, IDC_APPSTARTING);
-    HCURSOR last = g_last_set.load();
-    if (show && n == 0 && (last == wait || last == starting)) { // (a loading screen ended: the busy cursor, then shown)
-        LOG("a load ended (busy cursor, then shown)");
-    }
-    // (logged when it changes whether the cursor shows: the count crosses 0)
-    if ((show && n == 0) || (!show && n == -1))
-        LOG("ShowCursor(%s) -> count %d: cursor %s%s", show ? "TRUE" : "FALSE", n, show ? "shown" : "hidden",
-            t_in_setcursor ? " (while answering WM_SETCURSOR)" : "");
-    return n;
-}
-
 BOOL CALLBACK wrap_existing(HWND h, LPARAM)
 {
     DWORD pid = 0;
     GetWindowThreadProcessId(h, &pid);
     if (pid == GetCurrentProcessId() && IsWindowVisible(h)) wrap(h, "already there");
     return TRUE;
+}
+
+// --- finding the release function -----------------------------------------------------------------------------------
+// mov [rsp+18],rbx; mov [rsp+10],rdx; push rdi; sub rsp,20; mov rdi,rcx; mov byte [rcx+50],1; xor ecx,ecx;
+// mov rbx,rdx; call [rip+x] (ClipCursor(nullptr)): one match in the exe's code (build 26480954).
+const std::uint8_t kReleaseCode[] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x48, 0x89, 0x54, 0x24, 0x10, 0x57, 0x48, 0x83, 0xEC,
+                                     0x20, 0x48, 0x8B, 0xF9, 0xC6, 0x41, 0x50, 0x01, 0x33, 0xC9, 0x48, 0x8B, 0xDA, 0xFF,
+                                     0x15};
+
+int scan_section(const std::uint8_t* p, size_t n, UPTR& found)
+{
+    int hits = 0;
+    __try {
+        for (size_t k = 0; k + sizeof kReleaseCode <= n; ++k)
+            if (p[k] == 0x48 && std::memcmp(p + k, kReleaseCode, sizeof kReleaseCode) == 0)
+                found = reinterpret_cast<UPTR>(p + k), ++hits;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return hits;
+}
+
+UPTR find_release()
+{
+    auto base = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
+    auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
+    auto sec = IMAGE_FIRST_SECTION(nt);
+    UPTR found = 0;
+    int hits = 0;
+    for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec)
+        if ((sec->Characteristics & IMAGE_SCN_MEM_EXECUTE) && sec->Misc.VirtualSize >= sizeof kReleaseCode)
+            hits += scan_section(base + sec->VirtualAddress, sec->Misc.VirtualSize, found);
+    if (hits != 1) {
+        LOG("the game's mouse release code: %d matches (need exactly one): cursor mode fix off", hits);
+        return 0;
+    }
+    LOG("the game's mouse release code at +%llX", static_cast<unsigned long long>(found - reinterpret_cast<UPTR>(base)));
+    return found;
 }
 
 DWORD WINAPI init_thread(LPVOID)
@@ -313,19 +326,24 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v3 (cursor-mode DIAG) started");
-    if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
+    LOG("Borderless Lock v4 started");
+    if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
     }
     HMODULE u = GetModuleHandleW(L"user32.dll");
-    bool ok = true;
-    ok &= MH_CreateHook(reinterpret_cast<void*>(GetProcAddress(u, "CreateWindowExW")), &create_hook,
-                        reinterpret_cast<void**>(&g_create_orig)) == MH_OK;
+    bool ok = MH_CreateHook(reinterpret_cast<void*>(GetProcAddress(u, "CreateWindowExW")), &create_hook,
+                            reinterpret_cast<void**>(&g_create_orig)) == MH_OK;
     ok &= MH_CreateHook(reinterpret_cast<void*>(GetProcAddress(u, "SetCursor")), &setcursor_hook,
                         reinterpret_cast<void**>(&g_setcursor_orig)) == MH_OK;
     ok &= MH_CreateHook(reinterpret_cast<void*>(GetProcAddress(u, "ShowCursor")), &showcursor_hook,
                         reinterpret_cast<void**>(&g_showcursor_orig)) == MH_OK;
+    if ((g_release_addr = find_release()) != 0 &&
+        MH_CreateHook(reinterpret_cast<void*>(g_release_addr), &release_hook,
+                      reinterpret_cast<void**>(&g_release_orig)) != MH_OK) {
+        LOG("the mouse release hook failed: cursor mode fix off");
+        g_release_addr = 0;
+    }
     ok &= MH_EnableHook(MH_ALL_HOOKS) == MH_OK;
     LOG("hooks: %s", ok ? "in" : "FAILED (inactive)");
     EnumWindows(&wrap_existing, 0); // (a window made before the hooks went in)
