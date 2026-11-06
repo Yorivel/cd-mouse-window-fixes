@@ -34,6 +34,8 @@
 #include <cstdio>
 #include <cstring>
 #include <intrin.h>
+
+typedef unsigned __int64 QWORD; // (NEXTRAWINPUTBLOCK uses it)
 #include <map>
 #include <mutex>
 #include <string>
@@ -307,7 +309,7 @@ void __fastcall input_hook(UPTR self)
             if (ctrl) read_u8(ctrl + kOffReleased, rel);
             CURSORINFO ci{sizeof ci};
             GetCursorInfo(&ci);
-            LOG("MARKER %d: input layer %u, mouse %s, Windows cursor %s", ++n, layer,
+            LOG("MARKER %d (a scroll that didn't zoom): input layer %u, mouse %s, Windows cursor %s", ++n, layer,
                 rel == 1 ? "free (cursor mode)" : rel == 0 ? "captured (camera mode)" : "unknown",
                 (ci.flags & CURSOR_SHOWING) ? "showing" : "hidden");
         }
@@ -341,6 +343,52 @@ void __fastcall input_hook(UPTR self)
         LOG("camera mode restored (gameplay input layer %u, the mouse was free)", layer);
         // (v11: no layer kick: layer 1 is the title screen)
     }
+}
+
+// --- DIAG (v14): the mouse wheel as the game reads it --------------------------------------------------------------
+// (vanilla: zooming sometimes needs two or more notches) Every wheel event, by route: raw input (each read of an event
+// counted: a game may read the same one several times), the raw input buffer, the window message.
+using GetRawInputDataFn = UINT(WINAPI*)(HRAWINPUT, UINT, LPVOID, PUINT, UINT);
+using GetRawInputBufferFn = UINT(WINAPI*)(PRAWINPUT, PUINT, UINT);
+GetRawInputDataFn g_rid_orig = nullptr;
+GetRawInputBufferFn g_rib_orig = nullptr;
+std::atomic<unsigned> g_wheel_n{0};
+
+UINT WINAPI rid_hook(HRAWINPUT h, UINT cmd, LPVOID data, PUINT size, UINT header)
+{
+    UINT r = g_rid_orig(h, cmd, data, size, header);
+    if (cmd == RID_INPUT && data && r != UINT(-1) && r >= sizeof(RAWINPUTHEADER)) {
+        __try {
+            auto in = static_cast<RAWINPUT*>(data);
+            if (in->header.dwType == RIM_TYPEMOUSE && (in->data.mouse.usButtonFlags & RI_MOUSE_WHEEL)) {
+                static HRAWINPUT last = nullptr;
+                static int reads = 0;
+                reads = h == last ? reads + 1 : 1;
+                last = h;
+                LOG("DIAG wheel (raw input %p, read %d): %d", static_cast<void*>(h), reads,
+                    static_cast<SHORT>(in->data.mouse.usButtonData));
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return r;
+}
+
+UINT WINAPI rib_hook(PRAWINPUT data, PUINT size, UINT header)
+{
+    UINT r = g_rib_orig(data, size, header);
+    if (data && r != UINT(-1) && r > 0) {
+        __try {
+            PRAWINPUT in = data;
+            for (UINT i = 0; i < r; ++i) {
+                if (in->header.dwType == RIM_TYPEMOUSE && (in->data.mouse.usButtonFlags & RI_MOUSE_WHEEL))
+                    LOG("DIAG wheel (raw input buffer, %u events): %d", r, static_cast<SHORT>(in->data.mouse.usButtonData));
+                in = NEXTRAWINPUTBLOCK(in);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return r;
 }
 
 // --- the window procedure -------------------------------------------------------------------------------------------
@@ -405,6 +453,9 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         --g_deactivating;
         return r;
     }
+    case WM_MOUSEWHEEL:
+        LOG("DIAG wheel (window message): %d", static_cast<SHORT>(HIWORD(w)));
+        break;
     case WM_NCDESTROY: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
         std::lock_guard<std::mutex> lock(g_mu);
@@ -582,7 +633,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v13 started");
+    LOG("Borderless Lock v14 (wheel DIAG) started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
@@ -601,6 +652,10 @@ DWORD WINAPI init_thread(LPVOID)
         g_release_addr = 0;
     }
     g_hud_ret = find_hud_release();
+    MH_CreateHook(reinterpret_cast<void*>(GetProcAddress(u, "GetRawInputData")), &rid_hook,
+                  reinterpret_cast<void**>(&g_rid_orig));
+    MH_CreateHook(reinterpret_cast<void*>(GetProcAddress(u, "GetRawInputBuffer")), &rib_hook,
+                  reinterpret_cast<void**>(&g_rib_orig));
     if (UPTR f = find_input()) {
         if (MH_CreateHook(reinterpret_cast<void*>(f), &input_hook, reinterpret_cast<void**>(&g_input_orig)) != MH_OK)
             LOG("the input hook failed: the after-load fix is off");
