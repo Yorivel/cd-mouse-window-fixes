@@ -14,15 +14,8 @@
 //    and after the game comes back in front (if it was in camera mode when it lost focus) or after a load, calls the
 //    object's own capture, as the game does when Kliff moves. Before each call it checks the object's vtable still
 //    holds that release (a patch that changes the object turns this part off, nothing else).
-//    ShowCursor's count is kept between -1 (hidden) and 0 (shown), so the game's own capture after ours can't hide
-//    the cursor twice and keep it hidden in the next menu.
-// 4. Loads (v5): the game captures the mouse only when its input layer CHANGES to a gameplay one (its per-frame input
-//    function: layers 0, 1, 3, 5 capture), so after loading into the world (the mouse free from the title menus, the
-//    layer already gameplay) it stayed free until Kliff moved. The mod hooks that function (found by its code) and
-//    applies the same rule as a state: gameplay layer + focused + mouse free -> capture. Menus free the mouse in their
-//    own layers (4, 7: not capturing), so they're never touched. v6: the release when Kliff appears after a load comes
-//    in gameplay layer 1 and is overridden too; only if the game keeps re-freeing it in a gameplay layer (3 times in
-//    2 s) does the mod stand back until the layer changes.
+//    The game's ShowCursor count is left alone (v7: clamping it broke the title menu's cursor, which the game shows
+//    with counts above 0); its own capture skips itself once the mouse is captured, so ours can't stack.
 //
 // Log: BorderlessLock.log next to it.
 
@@ -105,9 +98,17 @@ HCURSOR WINAPI setcursor_hook(HCURSOR c)
 int WINAPI showcursor_hook(BOOL show)
 {
     int n = g_showcursor_orig(show);
-    // (kept between -1 hidden and 0 shown: a second capture or release must not stack)
-    if (n > 0) n = g_showcursor_orig(FALSE);
-    else if (n < -1) n = g_showcursor_orig(TRUE);
+    if (!t_own) { // DIAG (v7): every show / hide, the count, and the two callers above it (+RVA in the exe)
+        void* fr[3] = {};
+        USHORT k = CaptureStackBackTrace(1, 3, fr, nullptr);
+        static const UPTR exe = reinterpret_cast<UPTR>(GetModuleHandleW(nullptr));
+        char where[64] = "";
+        int pos = 0;
+        for (USHORT i = 0; i < k && pos < 50; ++i)
+            pos += std::snprintf(where + pos, sizeof where - pos, " +%llX",
+                                 static_cast<unsigned long long>(reinterpret_cast<UPTR>(fr[i]) - exe));
+        LOG("DIAG ShowCursor(%s) -> count %d (%s) from%s", show ? "TRUE" : "FALSE", n, n >= 0 ? "shown" : "hidden", where);
+    }
     return n;
 }
 
@@ -435,7 +436,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v6 started");
+    LOG("Borderless Lock v7 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
