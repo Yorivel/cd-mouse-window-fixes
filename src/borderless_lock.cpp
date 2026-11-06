@@ -6,9 +6,10 @@
 // The cursor (v1, from v0's log): the game never answers WM_SETCURSOR, so on every click / move Windows puts up the
 // window's default arrow until the game's next SetCursor covers it (right clicks in menus: until release; the outer
 // strip of the screen: always). Over the game's own area the mod answers it with the game's last cursor. And the game
-// shows its cursor when it loses focus and at the end of a load, hiding it again only when the mouse moves in gameplay:
-// right after it comes back in front, and after a load's ShowCursor, the mod nudges the mouse one pixel and back, so the
-// game decides as if it had moved (gameplay: hidden; a menu: kept).
+// shows its cursor when it loses focus and at the end of a load, hiding it again only when Kliff moves (v2: a mouse nudge
+// doesn't do it). So the mod hides it itself: back in front, if it was hidden when the game lost focus (gameplay; a
+// menu's cursor stays), and after a load (they end in gameplay). The game later hides it again itself, believing it
+// shown: ShowCursor's count is kept between -1 (hidden) and 0 (shown), so an extra hide or show changes nothing.
 //
 // Only Windows functions (user32), no game addresses: game patches can't break it. Log: BorderlessLock.log next to it.
 
@@ -99,23 +100,26 @@ thread_local bool t_own = false;           // (our own SetCursor: not the game's
 std::string g_last_setcursor_line;         // DIAG: the last WM_SETCURSOR line logged (only changes are logged)
 std::atomic<HCURSOR> g_game_cursor{nullptr}; // the game's last own cursor (not the arrow, not none)
 std::atomic<U32> g_replaced{0};              // arrows replaced (logged now and then)
-constexpr UINT kNudgeMsg = WM_APP + 0x4C42;  // (posted to the window: nudge once it is in front)
+constexpr UINT kRehideMsg = WM_APP + 0x4C42; // (posted to the window: hide the cursor again once it is in front)
+bool g_hidden_before = false;                // the cursor was hidden when the game lost focus (gameplay)
 HWND g_main = nullptr;                       // the game's main window (borderless when it was activated)
 
-// One pixel right and back: the game handles it as a mouse move (gameplay hides the cursor, a menu keeps it).
-void nudge(HWND h, const char* why)
+bool cursor_showing()
+{
+    CURSORINFO ci{sizeof ci};
+    return GetCursorInfo(&ci) && (ci.flags & CURSOR_SHOWING);
+}
+
+// The cursor hidden again, as the game does when Kliff moves (only while the game is in front and borderless).
+void rehide(HWND h, const char* why)
 {
     DWORD pid = 0;
     GetWindowThreadProcessId(GetForegroundWindow(), &pid);
-    if (pid != GetCurrentProcessId() || !borderless(h)) return;
-    INPUT in[2] = {};
-    for (int i = 0; i < 2; ++i) {
-        in[i].type = INPUT_MOUSE;
-        in[i].mi.dwFlags = MOUSEEVENTF_MOVE;
-        in[i].mi.dx = i == 0 ? 1 : -1;
-    }
-    UINT sent = SendInput(2, in, sizeof(INPUT));
-    LOG("nudged the mouse (%s): %u of 2", why, sent);
+    if (pid != GetCurrentProcessId() || !borderless(h) || !cursor_showing()) return;
+    t_own = true;
+    int n = ShowCursor(FALSE);
+    t_own = false;
+    LOG("cursor hidden again (%s): count %d", why, n);
 }
 
 LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
@@ -169,15 +173,18 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     case WM_ACTIVATE:
         if (LOWORD(w) != WA_INACTIVE && borderless(h)) g_main = h;
-        LOG("window %s", LOWORD(w) == WA_INACTIVE ? "deactivated" : "activated");
-        if (LOWORD(w) != WA_INACTIVE) PostMessageW(h, kNudgeMsg, 0, 0); // (after the activation has gone through)
+        if (LOWORD(w) == WA_INACTIVE) g_hidden_before = !cursor_showing(); // (before the game shows it)
+        LOG("window %s%s", LOWORD(w) == WA_INACTIVE ? "deactivated" : "activated",
+            LOWORD(w) == WA_INACTIVE ? (g_hidden_before ? " (cursor was hidden: gameplay)" : " (cursor was showing)") : "");
+        if (LOWORD(w) != WA_INACTIVE && g_hidden_before) PostMessageW(h, kRehideMsg, 0, 0); // (after the activation)
         break;
     case WM_ACTIVATEAPP:
         LOG("game %s", w ? "in front" : "in the background");
         break;
     default:
-        if (m == kNudgeMsg) {
-            nudge(h, w ? "after a load" : "back in front");
+        if (m == kRehideMsg) {
+            if (w || g_hidden_before) rehide(h, w ? "after a load" : "back in front in gameplay");
+            if (!w) g_hidden_before = false;
             return 0;
         }
         break;
@@ -253,11 +260,15 @@ HCURSOR WINAPI setcursor_hook(HCURSOR c)
 int WINAPI showcursor_hook(BOOL show)
 {
     int n = g_showcursor_orig(show);
+    // (kept between -1 hidden and 0 shown: our own hide and the game's later one must not stack)
+    if (n > 0) n = g_showcursor_orig(FALSE);
+    else if (n < -1) n = g_showcursor_orig(TRUE);
+    if (t_own) return n;
     static const HCURSOR wait = LoadCursorW(nullptr, IDC_WAIT), starting = LoadCursorW(nullptr, IDC_APPSTARTING);
     HCURSOR last = g_last_set.load();
     if (show && n == 0 && (last == wait || last == starting)) { // (a loading screen ended: the busy cursor, then shown)
         LOG("a load ended (busy cursor, then shown)");
-        if (g_main) PostMessageW(g_main, kNudgeMsg, 1, 0);
+        if (g_main) PostMessageW(g_main, kRehideMsg, 1, 0);
     }
     // (logged when it changes whether the cursor shows: the count crosses 0)
     if ((show && n == 0) || (!show && n == -1))
@@ -281,7 +292,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v1 started");
+    LOG("Borderless Lock v2 started");
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
         LOG("MinHook failed: inactive");
         return 0;
