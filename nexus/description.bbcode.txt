@@ -1,0 +1,59 @@
+[center][img]HEADER_URL[/img]
+
+Five small fixes for playing in [b]borderless window mode with mouse and keyboard[/b]. One file, [b]no game files changed[/b].
+
+[img]GLANCE_URL[/img]
+
+[color=#cb9349]Requires[/color] [b]an ASI loader (DMM has one)[/b]   [color=#cb9349]·[/color]   [color=#cb9349]Tested on[/color] [b]game 1.0.0.3576[/b]   [color=#cb9349]·[/color]   [color=#cb9349]Controller[/color] [b]not affected[/b]
+
+[img]SEP_FIXES_URL[/img]
+
+[color=#cb9349][b]No Accidental Resize[/b][/color]
+The borderless window has an invisible resize border, and the cursor starts right on its corner. One click and drag there and the game [b]shrinks into windowed mode[/b], and it's back to the settings. The mod turns that border off while the game covers the screen; [b]windowed mode is untouched[/b].
+
+[color=#cb9349][b]No Windows Arrow[/b][/color]
+Clicks and the screen edges no longer flash the [b]plain Windows arrow[/b] over the game.
+
+[color=#cb9349][b]The Camera Works Straight Away[/b][/color]
+After [b]Alt+Tab[/b], after [b]loading in[/b] and when the [b]HUD appears[/b], the mouse turns the camera at once, instead of steering an invisible cursor until Kliff takes a step. Menus keep their cursor.
+
+[color=#cb9349][b]A Proper Title Screen Cursor[/b][/color]
+No cursor over the intro. When the title prompts appear, it starts [b]on the logo's ring[/b] instead of the top-left corner.
+
+[color=#cb9349][b]One Notch, One Zoom[/b][/color]
+The game sometimes needed [b]two wheel notches[/b] before the camera zoomed. Now [b]every notch counts[/b].
+
+[img]SEP_INSTALLATION_URL[/img]
+
+[b]With DMM:[/b] add [b]MouseWindowFixes.asi[/b] as an ASI mod and enable it.
+
+[b]By hand:[/b] put [b]MouseWindowFixes.asi[/b] in [b]Crimson Desert\bin64[/b] (needs an ASI loader).
+
+To remove it, disable or delete the file. Nothing else is left behind.
+
+[img]SEP_GOOD_TO_KNOW_URL[/img]
+
+Game updates [b]rarely break it[/b]: the mod finds what it needs in the game's code each time it starts. If one search fails after a patch, [b]only that fix switches off[/b] and the rest keep working.
+
+After a game update, please report anything that stops working.
+
+[b]Compatibility, log and tested versions[/b]
+[spoiler]
+Works alongside other ASI mods, including Outfit Manager. Controllers are not affected; only the mouse, the keyboard and the window are.
+
+MouseWindowFixes.log, next to the file, lists what was found at start and which fix is off if something wasn't.
+
+Released under the MIT licence, which covers the mod's own work, not the game's content.
+
+Tested on Crimson Desert 1.0.0.3576 in borderless mode at 2560x1440.
+[/spoiler]
+
+[img]SEP_CREDITS_URL[/img]
+
+[b]Strahlimeier[/b]  [color=#cb9349]·[/color]  idea and testing
+[b]Claude (Anthropic)[/b]  [color=#cb9349]·[/color]  wrote the code
+[b][url=https://github.com/TsudaKageyu/minhook]Tsuda Kageyu[/url][/b]  [color=#cb9349]·[/color]  MinHook, the hooking library (BSD 2-Clause licence, included)
+[b]Friedrich Althausen[/b]  [color=#cb9349]·[/color]  Vollkorn, the game's UI font, used for these headings
+
+[b]Source code[/b]  Files tab, under Miscellaneous
+[/center]
