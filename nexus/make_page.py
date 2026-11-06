@@ -66,6 +66,7 @@ art.SECTIONS = [
                  'starts right on its corner. One click and drag there and the game **shrinks into windowed '
                  'mode**, and it\'s back to the settings. The mod turns that border off while the game covers '
                  'the screen; **windowed mode is untouched**.'),
+        ('media', 'resize', ['media_resize.gif'], '', True),
         ('step', 'No Windows Arrow', 'Clicks and the screen edges no longer flash the **plain Windows arrow** '
                  'over the game.'),
         ('step', 'The Camera Works Straight Away', 'After **Alt+Tab**, after **loading in** and when the '
@@ -73,6 +74,7 @@ art.SECTIONS = [
                  'until Kliff takes a step. Menus keep their cursor.'),
         ('step', 'A Proper Title Screen Cursor', 'No cursor over the intro. When the title prompts appear, it '
                  'starts **on the logo\'s ring** instead of the top-left corner.'),
+        ('media', 'title', ['media_title.png'], '', False),
         ('step', 'One Notch, One Zoom', 'The game sometimes needed **two wheel notches** before the camera '
                  'zoomed. Now **every notch counts**.'),
     ]),
@@ -108,6 +110,15 @@ art.SECTIONS = [
 
 art.header = header
 
+
+def media_image(files, caption, gif):
+    """The pictures come framed and captioned already (make_media.py); a GIF shows its first frame here."""
+    return Image.open(os.path.join(art.OUT, files[0])).convert('RGBA')
+
+
+art.media_image = media_image
+MEDIA = {b[1]: b[2][0] for _, _, blocks in art.SECTIONS for b in blocks if b[0] == 'media'}
+
 RAW = 'https://raw.githubusercontent.com/Yorivel/cd-mouse-window-fixes/main/nexus/out/'
 
 
@@ -116,6 +127,8 @@ def write_final():
     text = open(os.path.join(HERE, 'description.bbcode.txt'), encoding='utf-8').read()
     for key in ['header', 'glance'] + ['sep_' + k for k, _, _ in art.SECTIONS]:
         text = text.replace(key.upper() + '_URL', RAW + key + '.png')
+    for key, name in MEDIA.items():
+        text = text.replace('MEDIA_%s_URL' % key.upper(), RAW + name)
     assert '_URL[' not in text, 'placeholder left'
     with open(os.path.join(HERE, 'description.final.bbcode.txt'), 'w', encoding='utf-8') as f:
         f.write(text)
@@ -123,4 +136,7 @@ def write_final():
 
 if __name__ == '__main__':
     art.main()
+    for key, name in MEDIA.items():  # render_blocks() saves each picture as media_<key>.png: drop the GIFs' stills
+        if not name.endswith('.png'):
+            os.remove(os.path.join(art.OUT, 'media_%s.png' % key))
     write_final()

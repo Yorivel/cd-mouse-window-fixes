@@ -11,6 +11,8 @@ Five small fixes for playing in [b]borderless window mode with mouse and keyboar
 [color=#cb9349][b]No Accidental Resize[/b][/color]
 The borderless window has an invisible resize border, and the cursor starts right on its corner. One click and drag there and the game [b]shrinks into windowed mode[/b], and it's back to the settings. The mod turns that border off while the game covers the screen; [b]windowed mode is untouched[/b].
 
+[img]https://raw.githubusercontent.com/Yorivel/cd-mouse-window-fixes/main/nexus/out/media_resize.gif[/img]
+
 [color=#cb9349][b]No Windows Arrow[/b][/color]
 Clicks and the screen edges no longer flash the [b]plain Windows arrow[/b] over the game.
 
@@ -19,6 +21,8 @@ After [b]Alt+Tab[/b], after [b]loading in[/b] and when the [b]HUD appears[/b], t
 
 [color=#cb9349][b]A Proper Title Screen Cursor[/b][/color]
 No cursor over the intro. When the title prompts appear, it starts [b]on the logo's ring[/b] instead of the top-left corner.
+
+[img]https://raw.githubusercontent.com/Yorivel/cd-mouse-window-fixes/main/nexus/out/media_title.png[/img]
 
 [color=#cb9349][b]One Notch, One Zoom[/b][/color]
 The game sometimes needed [b]two wheel notches[/b] before the camera zoomed. Now [b]every notch counts[/b].
