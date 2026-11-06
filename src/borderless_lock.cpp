@@ -365,8 +365,20 @@ UINT WINAPI rid_hook(HRAWINPUT h, UINT cmd, LPVOID data, PUINT size, UINT header
                 static int reads = 0;
                 reads = h == last ? reads + 1 : 1;
                 last = h;
-                LOG("DIAG wheel (raw input %p, read %d): %d", static_cast<void*>(h), reads,
-                    static_cast<SHORT>(in->data.mouse.usButtonData));
+                static int stacks = 0; // (v15: who reads it: the first 8 notches, every read)
+                char where[160] = "";
+                if (stacks < 32) {
+                    ++stacks;
+                    void* fr[6] = {};
+                    USHORT k = CaptureStackBackTrace(1, 6, fr, nullptr);
+                    static const UPTR exe = reinterpret_cast<UPTR>(GetModuleHandleW(nullptr));
+                    int pos = 0;
+                    for (USHORT i = 0; i < k && pos < 140; ++i)
+                        pos += std::snprintf(where + pos, sizeof where - pos, " +%llX",
+                                             static_cast<unsigned long long>(reinterpret_cast<UPTR>(fr[i]) - exe));
+                }
+                LOG("DIAG wheel (raw input %p, read %d): %d%s%s", static_cast<void*>(h), reads,
+                    static_cast<SHORT>(in->data.mouse.usButtonData), where[0] ? " from" : "", where);
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
@@ -633,7 +645,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v14 (wheel DIAG) started");
+    LOG("Borderless Lock v15 (wheel DIAG) started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
