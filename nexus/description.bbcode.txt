@@ -17,7 +17,7 @@ The borderless window has an invisible resize border, and the cursor starts righ
 Clicks and the screen edges no longer flash the [b]plain Windows arrow[/b] over the game.
 
 [color=#cb9349][b]The Camera Works Straight Away[/b][/color]
-After [b]Alt+Tab[/b], after [b]loading in[/b] and when the [b]HUD appears[/b], the mouse turns the camera at once, instead of steering an invisible cursor until Kliff takes a step. Menus keep their cursor.
+The game sometimes [b]leaves the mouse in menu mode[/b] after you are back in the world: moving the mouse [b]doesn't turn the camera[/b], it steers an invisible menu cursor instead, until Kliff takes a step. It happens [b]when you load in[/b] (as soon as the HUD appears) and [b]when you come back to the game[/b] from another window, with Alt+Tab or a click. With the mod, the camera answers the mouse [b]right away[/b]. Menus keep their cursor.
 
 [color=#cb9349][b]A Proper Title Screen Cursor[/b][/color]
 No cursor over the intro. When the title prompts appear, it starts [b]on the logo's ring[/b] instead of the top-left corner.

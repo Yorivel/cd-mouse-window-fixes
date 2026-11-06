@@ -53,7 +53,7 @@ art.INTRO = [
     ('glance', 'glance', [
         ('icon_move', 'No Resize', 'the window stays borderless'),
         ('icon_click', 'Game Cursor', 'no Windows arrow on clicks'),
-        ('icon_mousemove', 'Camera Ready', 'after Alt+Tab and loading'),
+        ('icon_mousemove', 'Camera Ready', 'no stuck menu cursor in the world'),
         ('icon_wheel', 'One-Notch Zoom', 'every wheel notch zooms'),
     ]),
     ('req', [('Requires', 'an ASI loader (DMM has one)'), ('Tested on', 'game 1.0.0.3576'),
@@ -69,9 +69,11 @@ art.SECTIONS = [
         ('media', 'resize', ['media_resize.gif'], '', True),
         ('step', 'No Windows Arrow', 'Clicks and the screen edges no longer flash the **plain Windows arrow** '
                  'over the game.'),
-        ('step', 'The Camera Works Straight Away', 'After **Alt+Tab**, after **loading in** and when the '
-                 '**HUD appears**, the mouse turns the camera at once, instead of steering an invisible cursor '
-                 'until Kliff takes a step. Menus keep their cursor.'),
+        ('step', 'The Camera Works Straight Away', 'The game sometimes **leaves the mouse in menu mode** after '
+                 'you are back in the world: moving the mouse **doesn\'t turn the camera**, it steers an invisible '
+                 'menu cursor instead, until Kliff takes a step. It happens **when you load in** (as soon as the '
+                 'HUD appears) and **when you come back to the game** from another window, with Alt+Tab or a '
+                 'click. With the mod, the camera answers the mouse **right away**. Menus keep their cursor.'),
         ('step', 'A Proper Title Screen Cursor', 'No cursor over the intro. When the title prompts appear, it '
                  'starts **on the logo\'s ring** instead of the top-left corner.'),
         ('media', 'title', ['media_title.png'], '', False),

@@ -6,8 +6,10 @@ An ASI mod that fixes how Crimson Desert handles the mouse in borderless window 
   its corner, so a click and drag there shrank the game into windowed mode. The mod turns that border off while the
   game covers the screen. Windowed mode is untouched.
 - **No Windows arrow.** Clicks and the screen edges no longer flash the plain Windows arrow over the game.
-- **The camera works straight away.** After Alt+Tab, after loading in and when the HUD appears, the mouse turns the
-  camera at once instead of moving a cursor until Kliff takes a step. Menus keep their cursor.
+- **The camera works straight away.** The game sometimes leaves the mouse in menu mode after you are back in the
+  world: moving the mouse steers an invisible menu cursor instead of turning the camera, until Kliff takes a step.
+  It happens when you load in (as soon as the HUD appears) and when you come back to the game from another window
+  (Alt+Tab or a click). The mod hands the mouse back to the camera right away. Menus keep their cursor.
 - **The title cursor.** No cursor over the intro; when the title prompts appear it starts on the logo's ring.
 - **One notch, one zoom.** A single mouse-wheel notch zooms the camera (the game needed two in quick succession).
 
