@@ -131,6 +131,7 @@ int g_deactivating = 0;       // (window thread: inside the game's handling of l
 bool g_was_captured = false;  // the game was in camera mode when it lost focus
 UPTR g_hud_ret = 0;                     // the return address of the HUD's release call (see 5.)
 std::atomic<bool> g_freed_once{false};  // the game has freed the mouse itself at least once (the title prompts)
+std::atomic<bool> g_blank{false};       // between the HUD's release and our capture: no cursor image (v13: no flash)
 std::atomic<UPTR> g_input{0}; // the game's input manager (its per-frame function's this; +0x30 the input layer)
 std::atomic<int> g_block_layer{-1}; // the game freed the mouse itself in this layer: not ours to capture (-1: none)
 constexpr size_t kOffLayer = 0x30;
@@ -167,6 +168,7 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         g_freed_once = true;
         if (g_hud_ret && ret == g_hud_ret && layer == 4 && g_main) { // (the HUD appearing in the world: see 5.)
             LOG("  (the HUD appeared: camera mode back on the next frame)");
+            g_blank = true;
             PostMessageW(g_main, kRecaptureMsg, 1, 0); // (after the caller has set its own released flag)
         }
     }
@@ -182,6 +184,11 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         }
     }
     g_release_orig(obj, pos);
+    if (g_blank.load()) { // (the HUD's release just showed the cursor: blank its image until the capture)
+        t_own = true;
+        SetCursor(nullptr);
+        t_own = false;
+    }
 }
 
 // Calls the controller's own checks and capture, as the game does when Kliff moves. Only with the expected vtable.
@@ -363,7 +370,7 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     }
     case WM_SETCURSOR: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
-        if (!g_freed_once.load() && LOWORD(l) == HTCLIENT && borderless(h)) { // (intro / title art: no cursor, v12)
+        if ((!g_freed_once.load() || g_blank.load()) && LOWORD(l) == HTCLIENT && borderless(h)) { // (no cursor, v12/v13)
             t_own = true;
             SetCursor(nullptr);
             t_own = false;
@@ -407,6 +414,7 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     default:
         if (m == kRecaptureMsg) {
             if (w || g_was_captured) recapture(w ? "the HUD appeared" : "back in front");
+            if (w) g_blank = false; // (captured: the cursor is hidden by the game's own count now)
             if (!w) g_was_captured = false;
             return 0;
         }
@@ -574,7 +582,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v12 (F10 markers) started");
+    LOG("Borderless Lock v13 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
