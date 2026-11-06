@@ -3,9 +3,12 @@
 // corner. A click-and-drag there starts a real resize and the game drops to windowed mode. While the window covers its
 // monitor, those answers become "client" and the system Size / Move commands are ignored; windowed mode is untouched.
 //
-// v0 also logs how the game handles its cursor (WM_SETCURSOR, SetCursor, ShowCursor, focus changes), for v1: the Windows
-// arrow shows while a mouse button is held, and the game's cursor stays after a focus change or a load until the mouse
-// moves.
+// The cursor (v1, from v0's log): the game never answers WM_SETCURSOR, so on every click / move Windows puts up the
+// window's default arrow until the game's next SetCursor covers it (right clicks in menus: until release; the outer
+// strip of the screen: always). Over the game's own area the mod answers it with the game's last cursor. And the game
+// shows its cursor when it loses focus and at the end of a load, hiding it again only when the mouse moves in gameplay:
+// right after it comes back in front, and after a load's ShowCursor, the mod nudges the mouse one pixel and back, so the
+// game decides as if it had moved (gameplay: hidden; a menu: kept).
 //
 // Only Windows functions (user32), no game addresses: game patches can't break it. Log: BorderlessLock.log next to it.
 
@@ -14,13 +17,16 @@
 #include <windows.h>
 #include <MinHook.h>
 #include <atomic>
+#include <cstdint>
 #include <cstdio>
 #include <map>
 #include <mutex>
+#include <set>
 #include <string>
 
 namespace {
 
+using U32 = std::uint32_t;
 HMODULE g_self = nullptr;
 
 // --- the game's windows -------------------------------------------------------------------------------------------
@@ -89,7 +95,28 @@ std::string cursor_name(HCURSOR c)
 }
 
 thread_local bool t_in_setcursor = false; // (the game's SetCursor calls made while it answers WM_SETCURSOR)
+thread_local bool t_own = false;           // (our own SetCursor: not the game's choice)
 std::string g_last_setcursor_line;         // DIAG: the last WM_SETCURSOR line logged (only changes are logged)
+std::atomic<HCURSOR> g_game_cursor{nullptr}; // the game's last own cursor (not the arrow, not none)
+std::atomic<U32> g_replaced{0};              // arrows replaced (logged now and then)
+constexpr UINT kNudgeMsg = WM_APP + 0x4C42;  // (posted to the window: nudge once it is in front)
+HWND g_main = nullptr;                       // the game's main window (borderless when it was activated)
+
+// One pixel right and back: the game handles it as a mouse move (gameplay hides the cursor, a menu keeps it).
+void nudge(HWND h, const char* why)
+{
+    DWORD pid = 0;
+    GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    if (pid != GetCurrentProcessId() || !borderless(h)) return;
+    INPUT in[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        in[i].type = INPUT_MOUSE;
+        in[i].mi.dwFlags = MOUSEEVENTF_MOVE;
+        in[i].mi.dx = i == 0 ? 1 : -1;
+    }
+    UINT sent = SendInput(2, in, sizeof(INPUT));
+    LOG("nudged the mouse (%s): %u of 2", why, sent);
+}
 
 LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
@@ -115,10 +142,20 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         break;
     }
-    case WM_SETCURSOR: { // DIAG (v0): what the cursor is over, what asked, what the game chose
+    case WM_SETCURSOR: {
         t_in_setcursor = true;
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
         t_in_setcursor = false;
+        if (LOWORD(l) == HTCLIENT && borderless(h)) { // (the game left it to Windows: the arrow went up)
+            if (HCURSOR gc = g_game_cursor.load()) {
+                t_own = true;
+                SetCursor(gc);
+                t_own = false;
+                if (++g_replaced % 200 == 1) LOG("the Windows arrow replaced by the game's cursor (%u times so far)",
+                                                 g_replaced.load());
+            }
+            r = TRUE;
+        }
         CURSORINFO ci{sizeof ci};
         GetCursorInfo(&ci);
         char line[200];
@@ -131,10 +168,18 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         return r;
     }
     case WM_ACTIVATE:
+        if (LOWORD(w) != WA_INACTIVE && borderless(h)) g_main = h;
         LOG("window %s", LOWORD(w) == WA_INACTIVE ? "deactivated" : "activated");
+        if (LOWORD(w) != WA_INACTIVE) PostMessageW(h, kNudgeMsg, 0, 0); // (after the activation has gone through)
         break;
     case WM_ACTIVATEAPP:
         LOG("game %s", w ? "in front" : "in the background");
+        break;
+    default:
+        if (m == kNudgeMsg) {
+            nudge(h, w ? "after a load" : "back in front");
+            return 0;
+        }
         break;
     case WM_NCDESTROY: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
@@ -185,17 +230,35 @@ SetCursorFn g_setcursor_orig = nullptr;
 ShowCursorFn g_showcursor_orig = nullptr;
 std::atomic<HCURSOR> g_last_set{reinterpret_cast<HCURSOR>(~0ull)};
 
+std::mutex g_seen_mu;
+std::set<HCURSOR> g_seen; // DIAG: cursor handles the game has set (each logged once)
+
 HCURSOR WINAPI setcursor_hook(HCURSOR c)
 {
     HCURSOR prev = g_setcursor_orig(c);
-    if (g_last_set.exchange(c) != c)
-        LOG("SetCursor(%s)%s", cursor_name(c).c_str(), t_in_setcursor ? " while answering WM_SETCURSOR" : "");
+    if (t_own) return prev;
+    static const HCURSOR arrow = LoadCursorW(nullptr, IDC_ARROW);
+    if (c && c != arrow) g_game_cursor = c;
+    g_last_set = c;
+    bool fresh;
+    {
+        std::lock_guard<std::mutex> lock(g_seen_mu);
+        fresh = g_seen.insert(c).second;
+    }
+    if (fresh) LOG("the game set cursor %s for the first time", cursor_name(c).c_str());
     return prev;
 }
+
 
 int WINAPI showcursor_hook(BOOL show)
 {
     int n = g_showcursor_orig(show);
+    static const HCURSOR wait = LoadCursorW(nullptr, IDC_WAIT), starting = LoadCursorW(nullptr, IDC_APPSTARTING);
+    HCURSOR last = g_last_set.load();
+    if (show && n == 0 && (last == wait || last == starting)) { // (a loading screen ended: the busy cursor, then shown)
+        LOG("a load ended (busy cursor, then shown)");
+        if (g_main) PostMessageW(g_main, kNudgeMsg, 1, 0);
+    }
     // (logged when it changes whether the cursor shows: the count crosses 0)
     if ((show && n == 0) || (!show && n == -1))
         LOG("ShowCursor(%s) -> count %d: cursor %s%s", show ? "TRUE" : "FALSE", n, show ? "shown" : "hidden",
@@ -218,7 +281,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v0 started");
+    LOG("Borderless Lock v1 started");
     if (MH_Initialize() != MH_OK && MH_Initialize() != MH_ERROR_ALREADY_INITIALIZED) {
         LOG("MinHook failed: inactive");
         return 0;
