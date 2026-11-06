@@ -136,7 +136,7 @@ std::atomic<bool> g_freed_once{false};  // the game has freed the mouse itself a
 std::atomic<bool> g_blank{false};       // between the HUD's release and our capture: no cursor image (v13: no flash)
 std::atomic<UPTR> g_input{0}; // the game's input manager (its per-frame function's this; +0x30 the input layer)
 std::atomic<int> g_block_layer{-1}; // the game freed the mouse itself in this layer: not ours to capture (-1: none)
-constexpr size_t kOffLayer = 0x30;
+size_t kOffLayer = 0x30; // (read from the game's code by find_input: +0x28 in 1.0.0.2976)
 constexpr UINT kRecaptureMsg = WM_APP + 0x4C42; // (posted to the main window: back to camera mode; wParam 1 = a load)
 
 bool read_u8(UPTR a, std::uint8_t& out)
@@ -619,28 +619,25 @@ UPTR find_release()
     return found;
 }
 
-// cmp [rbx+30],r14b; jne +a; cmp [rbx+32],r15b; je rel32; cmp byte [rip+x],0 - one match (build 26480954), inside
-// the input function; its start from the exception table, checked against its prologue.
+// The input function, v23 (tested on all nine builds kept, 1.0.0.2976 to 26480954): anchored on its capture rule,
+// mov ecx,0x2B; bt ecx,r32 (the mask of the capturing layers: one match), and read from the code before it: the layer
+// compare cmp byte [rbx+d8],r8b; jne short; cmp byte [rbx+d8+2],r8b (the layer's offset: +0x30, +0x28 in 1.0.0.2976)
+// and the mouse-handling global cmp byte [rip+x],0 after them. The function's start from the exception table.
 UPTR find_input()
 {
     auto base = reinterpret_cast<const std::uint8_t*>(GetModuleHandleW(nullptr));
     auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64*>(base + reinterpret_cast<const IMAGE_DOS_HEADER*>(base)->e_lfanew);
     auto sec = IMAGE_FIRST_SECTION(nt);
-    const std::uint8_t pat[] = {0x44, 0x38, 0x73, 0x30, 0x75, 0, 0x44, 0x38, 0x7B, 0x32, 0x0F, 0x84, 0, 0, 0, 0, 0x80, 0x3D};
-    const bool any[] = {0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0};
-    UPTR hit = 0;
+    const std::uint8_t anchor[] = {0xB9, 0x2B, 0x00, 0x00, 0x00, 0x44, 0x0F, 0xA3};
+    const std::uint8_t* hit = nullptr;
     int hits = 0;
     for (WORD i = 0; i < nt->FileHeader.NumberOfSections; ++i, ++sec) {
         if (!(sec->Characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
         const std::uint8_t* p = base + sec->VirtualAddress;
         size_t n = sec->Misc.VirtualSize;
         __try {
-            for (size_t k = 0; k + sizeof pat <= n; ++k) {
-                if (p[k] != 0x44) continue;
-                size_t j = 0;
-                while (j < sizeof pat && (any[j] || p[k + j] == pat[j])) ++j;
-                if (j == sizeof pat) hit = reinterpret_cast<UPTR>(p + k), ++hits;
-            }
+            for (size_t k = 0x80; k + sizeof anchor <= n; ++k)
+                if (p[k] == 0xB9 && std::memcmp(p + k, anchor, sizeof anchor) == 0) hit = p + k, ++hits;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
@@ -648,16 +645,39 @@ UPTR find_input()
         LOG("the game's input layer code: %d matches (need exactly one): the after-load fix is off", hits);
         return 0;
     }
-    DWORD64 image = 0;
-    auto fe = RtlLookupFunctionEntry(hit, &image, nullptr);
-    const std::uint8_t prologue[] = {0x48, 0x89, 0x5C, 0x24, 0x18, 0x55, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57};
-    UPTR start = fe ? static_cast<UPTR>(image + fe->BeginAddress) : 0;
-    if (!start || std::memcmp(reinterpret_cast<void*>(start), prologue, sizeof prologue) != 0) {
-        LOG("the game's input function: unexpected start: the after-load fix is off");
+    // the layer compare and the global, in the 0x80 bytes before the anchor
+    auto is_cmp = [](const std::uint8_t* q) { // cmp byte [rbx+d8], r8b..r15b (44 38 ModRM d8, rm = rbx, mod = 01)
+        return q[0] == 0x44 && q[1] == 0x38 && (q[2] & 0xC7) == 0x43;
+    };
+    int layer = -1;
+    UPTR flag = 0;
+    __try {
+        for (const std::uint8_t* q = hit - 0x80; q + 10 <= hit && layer < 0; ++q)
+            if (is_cmp(q) && q[4] == 0x75 && is_cmp(q + 6) && q[9] == std::uint8_t(q[3] + 2)) {
+                layer = q[3];
+                for (const std::uint8_t* g = q + 10; g + 7 <= hit; ++g)
+                    if (g[0] == 0x80 && g[1] == 0x3D && g[6] == 0x00) {
+                        flag = reinterpret_cast<UPTR>(g) + 7 + *reinterpret_cast<const std::int32_t*>(g + 2);
+                        break;
+                    }
+            }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    if (layer < 0 || !flag) {
+        LOG("the game's input layer code: its layer / mouse flag not readable: the after-load fix is off");
         return 0;
     }
-    g_input_flag = hit + 16 + 7 + *reinterpret_cast<const std::int32_t*>(hit + 18); // (cmp byte [rip+x],0: 7 bytes)
-    LOG("the game's input function at +%llX", static_cast<unsigned long long>(start - reinterpret_cast<UPTR>(base)));
+    DWORD64 image = 0;
+    auto fe = RtlLookupFunctionEntry(reinterpret_cast<DWORD64>(hit), &image, nullptr);
+    UPTR start = fe ? static_cast<UPTR>(image + fe->BeginAddress) : 0;
+    if (!start || start >= reinterpret_cast<UPTR>(hit) || reinterpret_cast<UPTR>(hit) - start > 0x4000) {
+        LOG("the game's input function: no start found: the after-load fix is off");
+        return 0;
+    }
+    kOffLayer = static_cast<size_t>(layer);
+    g_input_flag = flag;
+    LOG("the game's input function at +%llX (input layer at +0x%X)",
+        static_cast<unsigned long long>(start - reinterpret_cast<UPTR>(base)), layer);
     return start;
 }
 
@@ -708,7 +728,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v22 started");
+    LOG("Borderless Lock v23 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
