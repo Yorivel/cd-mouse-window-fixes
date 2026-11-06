@@ -218,6 +218,42 @@ bool read_ptr(UPTR a, UPTR& out)
     }
 }
 
+// DIAG (v9): F10 writes the input objects to the log (hex): the input function's object, the object at its +8, the
+// one that holds the mouse controller, the controller itself. Snapshots taken locked / unlocked show what a direction
+// key changes.
+bool dump_block(const char* name, UPTR a, size_t n)
+{
+    if (!a) return false;
+    LOG("DIAG snapshot %s at %llX:", name, static_cast<unsigned long long>(a));
+    char line[200];
+    for (size_t o = 0; o < n; o += 32) {
+        int pos = std::snprintf(line, sizeof line, "  +%03zX:", o);
+        for (size_t i = 0; i < 32; ++i) {
+            std::uint8_t b = 0;
+            if (!read_u8(a + o + i, b)) {
+                LOG("%s (unreadable after this)", line);
+                return true;
+            }
+            pos += std::snprintf(line + pos, sizeof line - pos, i % 8 ? "%02X" : " %02X", b);
+        }
+        LOG("%s", line);
+    }
+    return true;
+}
+
+void snapshot(UPTR self)
+{
+    static int count = 0;
+    LOG("DIAG ===== snapshot %d =====", ++count);
+    UPTR a = 0, b = 0, ctrl = 0;
+    dump_block("input function's object", self, 0x400);
+    if (read_ptr(self + 8, a)) dump_block("its +8", a, 0x100);
+    if (a && read_ptr(a + 0x78, b) && read_ptr(b, b)) {
+        dump_block("the controller's holder", b, 0x100);
+        if (read_ptr(b + 0x78, ctrl)) dump_block("the mouse controller", ctrl, 0x100);
+    }
+}
+
 std::atomic<bool> g_kick{false}; // a load's release was overridden: move the input layer to gameplay (0) once
 constexpr size_t kOffLayerFlags = 0x3A; // 7 flags, one per layer: the first one set is the layer
 
@@ -238,6 +274,12 @@ void __fastcall input_hook(UPTR self)
     }
     g_input_orig(self);
     g_input = self;
+    { // DIAG (v9): F10 = snapshot
+        static bool was = false;
+        bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
+        if (down && !was) snapshot(self);
+        was = down;
+    }
     std::uint8_t layer = 0xFF, flag = 0, released = 0, cfg_on = 0;
     if (!read_u8(self + kOffLayer, layer)) return;
     static int last_layer = -2;
@@ -458,7 +500,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v8 started");
+    LOG("Borderless Lock v9 (F10 snapshots) started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
