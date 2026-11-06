@@ -1,15 +1,29 @@
-# Borderless Lock (Crimson Desert)
+# Mouse & Window Fixes (Crimson Desert)
 
-A small ASI mod for Crimson Desert in borderless window mode. Private, in testing.
+An ASI mod that fixes how Crimson Desert handles the mouse in borderless window mode.
 
-- **No accidental resize:** the game's borderless window reports an invisible 8 px resize border, and the cursor starts
-  on its top-left corner, so a click and drag there shrank the game into windowed mode. The mod reports that border as
-  game area while the window covers its monitor. Windowed mode is untouched.
-- **No Windows arrow:** the game never answers Windows' cursor request, so clicks and the screen edges showed the plain
-  Windows arrow. The mod answers with the game's own cursor.
-- **Camera mode back at once:** after Alt+Tab or a load, the game left the mouse driving a cursor instead of the camera
-  until Kliff moved. The mod puts it back the way the game does when Kliff moves, using the game's own mouse code
-  (found by its bytes, so a patch that changes it switches only this part off). Menus keep their cursor.
+- **No accidental resize.** The borderless game window has an invisible resize border, and the cursor starts right on
+  its corner, so a click and drag there shrank the game into windowed mode. The mod turns that border off while the
+  game covers the screen. Windowed mode is untouched.
+- **No Windows arrow.** Clicks and the screen edges no longer flash the plain Windows arrow over the game.
+- **The camera works straight away.** After Alt+Tab, after loading in and when the HUD appears, the mouse turns the
+  camera at once instead of moving a cursor until Kliff takes a step. Menus keep their cursor.
+- **The title cursor.** No cursor over the intro; when the title prompts appear it starts on the logo's ring.
+- **One notch, one zoom.** A single mouse-wheel notch zooms the camera (the game needed two in quick succession).
 
-Build: Visual Studio 2022, then `build.cmd` (CMake fetches MinHook 1.3.4). Output: `build\BorderlessLock.asi`, loaded
-by an ASI loader or DMM. Log: `BorderlessLock.log` next to the ASI.
+Every game address is found by searching the game's code when it starts, so game updates rarely break it. If one of
+the searches fails after an update, only that fix switches off; the log says which.
+
+## Install
+
+Needs an ASI loader (DMM installs one). Put `MouseWindowFixes.asi` in the game's `bin64` folder, or add it to DMM.
+The log is `MouseWindowFixes.log` next to it.
+
+## Build
+
+Visual Studio 2022, then `build.cmd` (CMake fetches MinHook 1.3.4). Output: `build\MouseWindowFixes.asi`.
+
+`tools/bl_backtest.py <exe>...` runs the mod's code searches on game executables, to check a new game build before
+playing it (each search must find exactly one place).
+
+MIT licence (`LICENSE.txt`); MinHook keeps its own BSD 2-Clause licence (`THIRD-PARTY-MinHook-LICENSE.txt`).

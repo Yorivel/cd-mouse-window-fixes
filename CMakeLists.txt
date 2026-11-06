@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-project(BorderlessLock LANGUAGES C CXX)
+project(MouseWindowFixes LANGUAGES C CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -12,9 +12,9 @@ FetchContent_Declare(minhook
     GIT_SHALLOW TRUE)
 FetchContent_MakeAvailable(minhook)
 
-add_library(BorderlessLock SHARED src/borderless_lock.cpp src/log.cpp)
-target_link_libraries(BorderlessLock PRIVATE minhook)
-target_include_directories(BorderlessLock PRIVATE src)
-target_compile_definitions(BorderlessLock PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
-target_compile_options(BorderlessLock PRIVATE /W4 /permissive- /utf-8)
-set_target_properties(BorderlessLock PROPERTIES SUFFIX ".asi")
+add_library(MouseWindowFixes SHARED src/mouse_window_fixes.cpp src/log.cpp src/mouse_window_fixes.rc)
+target_link_libraries(MouseWindowFixes PRIVATE minhook)
+target_include_directories(MouseWindowFixes PRIVATE src)
+target_compile_definitions(MouseWindowFixes PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX UNICODE _UNICODE)
+target_compile_options(MouseWindowFixes PRIVATE /W4 /permissive- /utf-8)
+set_target_properties(MouseWindowFixes PROPERTIES SUFFIX ".asi")
