@@ -167,13 +167,15 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         g_block_layer = !capturing || repeated ? layer : -1;
         LOG("the game released the mouse itself (input layer %u)%s", layer,
             !capturing ? "" : repeated ? ": again and again, left free until the layer changes" : ": overridden");
-        if (!g_freed_once.exchange(true) && g_main) { // (the title prompts: the cursor starts in the middle, v17)
+        if (!g_freed_once.exchange(true) && g_main) { // (the title prompts: the cursor starts in the middle, v18)
             RECT r{};
-            if (GetClientRect(g_main, &r)) {
-                POINT c{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
-                ClientToScreen(g_main, &c);
-                SetCursorPos(c.x, c.y);
-                LOG("title prompts: cursor centred at %ld,%ld", c.x, c.y);
+            if (GetClientRect(g_main, &r)) { // (the release puts the cursor at the controller's saved spot, +0x48 / +0x4C)
+                __try {
+                    *reinterpret_cast<volatile std::int32_t*>(obj + 0x48) = (r.left + r.right) / 2;
+                    *reinterpret_cast<volatile std::int32_t*>(obj + 0x4C) = (r.top + r.bottom) / 2;
+                    LOG("title prompts: cursor to the middle (%ld,%ld)", (r.left + r.right) / 2, (r.top + r.bottom) / 2);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                }
             }
         }
         if (g_hud_ret && ret == g_hud_ret && layer == 4 && g_main) { // (the HUD appearing in the world: see 5.)
@@ -377,6 +379,7 @@ using GetRawInputBufferFn = UINT(WINAPI*)(PRAWINPUT, PUINT, UINT);
 GetRawInputDataFn g_rid_orig = nullptr;
 GetRawInputBufferFn g_rib_orig = nullptr;
 std::atomic<unsigned> g_wheel_n{0};
+constexpr ULONG_PTR kWheelMark = 0x4D57464Cu; // (the mod's own wheel events)
 
 UINT WINAPI rid_hook(HRAWINPUT h, UINT cmd, LPVOID data, PUINT size, UINT header)
 {
@@ -385,10 +388,6 @@ UINT WINAPI rid_hook(HRAWINPUT h, UINT cmd, LPVOID data, PUINT size, UINT header
         __try {
             auto in = static_cast<RAWINPUT*>(data);
             if (in->header.dwType == RIM_TYPEMOUSE && (in->data.mouse.usButtonFlags & RI_MOUSE_WHEEL)) {
-                // (v17 test: one notch at double strength - the game zooms only after a second notch within a short
-                // window; does it count strength or events?)
-                SHORT d = static_cast<SHORT>(in->data.mouse.usButtonData);
-                if (d == WHEEL_DELTA || d == -WHEEL_DELTA) in->data.mouse.usButtonData = static_cast<USHORT>(d * 2);
                 static HRAWINPUT last = nullptr;
                 static int reads = 0;
                 reads = h == last ? reads + 1 : 1;
@@ -493,9 +492,26 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         --g_deactivating;
         return r;
     }
-    case WM_MOUSEWHEEL:
-        LOG("DIAG wheel (window message): %d", static_cast<SHORT>(HIWORD(w)));
+    case WM_MOUSEWHEEL: {
+        // (v18: the game zooms only on a second wheel event within a short window; a lone notch - none in the last
+        // 400 ms - gets a second event right after it, marked so it isn't doubled again)
+        static ULONGLONG last = 0;
+        ULONGLONG now = GetTickCount64();
+        bool ours = GetMessageExtraInfo() == static_cast<LPARAM>(kWheelMark);
+        LOG("DIAG wheel (window message): %d%s", static_cast<SHORT>(HIWORD(w)), ours ? " (the mod's second event)" : "");
+        if (!ours) {
+            if (now - last > 400 && borderless(h)) {
+                INPUT in{};
+                in.type = INPUT_MOUSE;
+                in.mi.dwFlags = MOUSEEVENTF_WHEEL;
+                in.mi.mouseData = static_cast<DWORD>(static_cast<SHORT>(HIWORD(w)));
+                in.mi.dwExtraInfo = kWheelMark;
+                SendInput(1, &in, sizeof in);
+            }
+            last = now;
+        }
         break;
+    }
     case WM_NCDESTROY: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
         std::lock_guard<std::mutex> lock(g_mu);
@@ -673,7 +689,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v17 started");
+    LOG("Borderless Lock v18 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
