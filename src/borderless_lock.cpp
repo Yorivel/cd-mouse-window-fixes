@@ -19,8 +19,10 @@
 // 4. Loads (v5): the game captures the mouse only when its input layer CHANGES to a gameplay one (its per-frame input
 //    function: layers 0, 1, 3, 5 capture), so after loading into the world (the mouse free from the title menus, the
 //    layer already gameplay) it stayed free until Kliff moved. The mod hooks that function (found by its code) and
-//    applies the same rule as a state: gameplay layer + focused + mouse free -> capture. Unless the game itself freed
-//    the mouse in that layer (not by losing focus): then it waits until the layer changes or the game captures again.
+//    applies the same rule as a state: gameplay layer + focused + mouse free -> capture. Menus free the mouse in their
+//    own layers (4, 7: not capturing), so they're never touched. v6: the release when Kliff appears after a load comes
+//    in gameplay layer 1 and is overridden too; only if the game keeps re-freeing it in a gameplay layer (3 times in
+//    2 s) does the mod stand back until the layer changes.
 //
 // Log: BorderlessLock.log next to it.
 
@@ -142,8 +144,15 @@ void __fastcall release_hook(UPTR obj, U64 pos)
     if (!g_deactivating) { // (the game's own choice, a menu or a load: respected while its layer lasts)
         std::uint8_t layer = 0xFF;
         if (UPTR in = g_input.load()) read_u8(in + kOffLayer, layer);
-        g_block_layer = layer;
-        LOG("DIAG the game released the mouse itself (input layer %u)", layer);
+        // (a release in a capturing layer is a load's leftover: overridden, unless it keeps coming)
+        static ULONGLONG times[3] = {};
+        ULONGLONG now = GetTickCount64();
+        times[0] = times[1], times[1] = times[2], times[2] = now;
+        bool capturing = layer <= 5 && ((0x2B >> layer) & 1);
+        bool repeated = capturing && times[0] && now - times[0] < 2000;
+        g_block_layer = !capturing || repeated ? layer : -1;
+        LOG("the game released the mouse itself (input layer %u)%s", layer,
+            !capturing ? "" : repeated ? ": again and again, left free until the layer changes" : ": overridden");
     }
     if (g_deactivating) {
         g_was_captured = released == 0;
@@ -426,7 +435,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v5 started");
+    LOG("Borderless Lock v6 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
