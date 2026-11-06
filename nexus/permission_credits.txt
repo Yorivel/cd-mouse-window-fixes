@@ -1,0 +1,1 @@
+MinHook by Tsuda Kageyu (https://github.com/TsudaKageyu/minhook), the hooking library built into the ASI, used under its BSD 2-Clause licence (included in the download). The page headings use Vollkorn by Friedrich Althausen (SIL Open Font License); the page art uses Crimson Desert's own UI icons.

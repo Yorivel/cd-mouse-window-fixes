@@ -1,1 +1,5 @@
-The mod is open source under the MIT licence (source code on GitHub and in the Files tab): you may use, change, fix, port and re-upload it, also as part of a collection or a modpack, as long as the licence and the credit come along. A link back to this page is appreciated. The MIT licence covers the mod's own work only, not the game's content.
+Mouse & Window Fixes is released under the MIT licence (LICENSE.txt in the download; source code in the Files tab and on GitHub: https://github.com/Yorivel/cd-mouse-window-fixes).
+
+You may use, change, fix, port and re-upload it, also as part of a collection or a modpack, and you may use its code in your own mods, as long as the MIT licence text and the credit to Strahlimeier stay with it. A link back to this page is appreciated.
+
+MinHook, built into the ASI, keeps its own BSD 2-Clause licence, which must be included too. The MIT licence covers this mod's own work only, not the game's content.
