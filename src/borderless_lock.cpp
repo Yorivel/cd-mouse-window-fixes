@@ -167,17 +167,7 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         g_block_layer = !capturing || repeated ? layer : -1;
         LOG("the game released the mouse itself (input layer %u)%s", layer,
             !capturing ? "" : repeated ? ": again and again, left free until the layer changes" : ": overridden");
-        if (!g_freed_once.exchange(true) && g_main) { // (the title prompts: the cursor starts in the middle, v18)
-            RECT r{};
-            if (GetClientRect(g_main, &r)) { // (the release puts the cursor at the controller's saved spot, +0x48 / +0x4C)
-                __try {
-                    *reinterpret_cast<volatile std::int32_t*>(obj + 0x48) = (r.left + r.right) / 2;
-                    *reinterpret_cast<volatile std::int32_t*>(obj + 0x4C) = (r.top + r.bottom) / 2;
-                    LOG("title prompts: cursor to the middle (%ld,%ld)", (r.left + r.right) / 2, (r.top + r.bottom) / 2);
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                }
-            }
-        }
+        g_freed_once = true;
         if (g_hud_ret && ret == g_hud_ret && layer == 4 && g_main) { // (the HUD appearing in the world: see 5.)
             LOG("  (the HUD appeared: camera mode back on the next frame)");
             g_blank = true;
@@ -193,6 +183,19 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         if (last == wait || last == starting) { // (a load ended: the busy cursor, then the release)
             LOG("the game released the mouse at a load's end");
             if (g_main) PostMessageW(g_main, kRecaptureMsg, 1, 0);
+        }
+    }
+    { // (v19: the saved spot is 0,0 until the cursor was first placed - the top left; the middle instead, whichever
+      // release comes first: the title prompts, or losing focus when the game started in the background)
+        RECT r{};
+        __try {
+            HWND w = *reinterpret_cast<HWND volatile*>(obj + 0x40); // (the controller's own window)
+            auto sx = reinterpret_cast<volatile std::int32_t*>(obj + 0x48), sy = reinterpret_cast<volatile std::int32_t*>(obj + 0x4C);
+            if (*sx == 0 && *sy == 0 && IsWindow(w) && GetClientRect(w, &r)) {
+                *sx = (r.left + r.right) / 2, *sy = (r.top + r.bottom) / 2;
+                LOG("the cursor's first spot: the middle (%ld,%ld)", (r.left + r.right) / 2, (r.top + r.bottom) / 2);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
     }
     g_release_orig(obj, pos);
@@ -380,6 +383,8 @@ GetRawInputDataFn g_rid_orig = nullptr;
 GetRawInputBufferFn g_rib_orig = nullptr;
 std::atomic<unsigned> g_wheel_n{0};
 constexpr ULONG_PTR kWheelMark = 0x4D57464Cu; // (the mod's own wheel events)
+constexpr UINT_PTR kWheelTimer = 0x4C42;
+SHORT g_wheel_pending = 0;
 
 UINT WINAPI rid_hook(HRAWINPUT h, UINT cmd, LPVOID data, PUINT size, UINT header)
 {
@@ -500,18 +505,26 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         bool ours = GetMessageExtraInfo() == static_cast<LPARAM>(kWheelMark);
         LOG("DIAG wheel (window message): %d%s", static_cast<SHORT>(HIWORD(w)), ours ? " (the mod's second event)" : "");
         if (!ours) {
-            if (now - last > 400 && borderless(h)) {
-                INPUT in{};
-                in.type = INPUT_MOUSE;
-                in.mi.dwFlags = MOUSEEVENTF_WHEEL;
-                in.mi.mouseData = static_cast<DWORD>(static_cast<SHORT>(HIWORD(w)));
-                in.mi.dwExtraInfo = kWheelMark;
-                SendInput(1, &in, sizeof in);
+            if (now - last > 400 && borderless(h)) { // (v19: 50 ms later, a few frames on: two in one frame count once)
+                g_wheel_pending = static_cast<SHORT>(HIWORD(w));
+                SetTimer(h, kWheelTimer, 50, nullptr);
             }
             last = now;
         }
         break;
     }
+    case WM_TIMER:
+        if (w == kWheelTimer) {
+            KillTimer(h, kWheelTimer);
+            INPUT in{};
+            in.type = INPUT_MOUSE;
+            in.mi.dwFlags = MOUSEEVENTF_WHEEL;
+            in.mi.mouseData = static_cast<DWORD>(static_cast<int>(g_wheel_pending));
+            in.mi.dwExtraInfo = kWheelMark;
+            SendInput(1, &in, sizeof in);
+            return 0;
+        }
+        break;
     case WM_NCDESTROY: {
         LRESULT r = CallWindowProcW(orig, h, m, w, l);
         std::lock_guard<std::mutex> lock(g_mu);
@@ -689,7 +702,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v18 started");
+    LOG("Borderless Lock v19 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
