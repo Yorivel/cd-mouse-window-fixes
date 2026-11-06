@@ -340,7 +340,9 @@ LRESULT CALLBACK lock_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         HCURSOR gc = g_game_cursor.load();
         // (the game left it to Windows: the arrow went up. Before the game has a cursor of its own - the title menu
         // uses the plain arrow - Windows' answer stays, v8)
-        if (gc && LOWORD(l) == HTCLIENT && borderless(h)) {
+        // (v10: and only once the world has loaded - the gameplay input function has run. The game's own cursors
+        // are blank, its menus draw their own; the title screen shows Windows' arrow and must keep it)
+        if (gc && g_input.load() && LOWORD(l) == HTCLIENT && borderless(h)) {
             t_own = true;
             SetCursor(gc);
             t_own = false;
@@ -500,7 +502,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v9 (F10 snapshots) started");
+    LOG("Borderless Lock v10 (F10 snapshots) started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
