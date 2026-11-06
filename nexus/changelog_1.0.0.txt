@@ -1,0 +1,7 @@
+First release.
+- No accidental resize: the borderless window's invisible resize border is turned off while the game covers the screen.
+- No Windows arrow over the game on clicks or at the screen edges.
+- The camera answers the mouse right away after loading in and after coming back to the game (Alt+Tab or a click), instead of steering an invisible menu cursor until Kliff moves.
+- Title screen: no cursor over the intro; it starts on the logo's ring when the prompts appear.
+- One wheel notch zooms the camera.
+Technical: every game address is found by a code search at start; a failed search switches off only its own fix (see MouseWindowFixes.log).

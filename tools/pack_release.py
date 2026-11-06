@@ -18,7 +18,8 @@ with zipfile.ZipFile(main, 'w', zipfile.ZIP_DEFLATED) as z:
     z.write(os.path.join(ROOT, 'THIRD-PARTY-MinHook-LICENSE.txt'), 'licenses/THIRD-PARTY-MinHook-LICENSE.txt')
 print(main, os.path.getsize(main) // 1024, 'KB')
 
-files = subprocess.run(['git', '-C', ROOT, 'ls-files'], capture_output=True, text=True, check=True).stdout.split()
+files = [f for f in subprocess.run(['git', '-C', ROOT, 'ls-files'], capture_output=True, text=True, check=True).stdout.split()
+         if not f.startswith('nexus/')]  # (the page art isn't source)
 src = os.path.join(OUT, f'MouseWindowFixes-{ver}-source.zip')
 with zipfile.ZipFile(src, 'w', zipfile.ZIP_DEFLATED) as z:
     for f in files:
