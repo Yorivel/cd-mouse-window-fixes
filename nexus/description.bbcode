@@ -1,0 +1,31 @@
+[size=5][b]Mouse & Window Fixes[/b][/size]
+
+Small fixes for playing Crimson Desert with mouse and keyboard in borderless window mode. No game files are changed: it is a single ASI file.
+
+[size=4][b]What it fixes[/b][/size]
+[list]
+[*][b]No accidental resize.[/b] The borderless window has an invisible resize border and the cursor starts right on its corner, so a click and drag there shrank the game into windowed mode and you had to set borderless again in the settings. The mod turns that border off while the game covers the screen. Windowed mode is untouched.
+[*][b]No Windows arrow.[/b] Clicks and the screen edges no longer flash the plain Windows arrow over the game.
+[*][b]The camera works straight away.[/b] After Alt+Tab, after loading in and when the HUD appears, the mouse turns the camera at once instead of moving an invisible cursor until Kliff takes a step. Menus keep their cursor.
+[*][b]Title screen cursor.[/b] No cursor over the intro; when the title prompts appear it starts on the logo's ring instead of the top-left corner.
+[*][b]One notch, one zoom.[/b] A single mouse-wheel notch zooms the camera (the game sometimes needed two).
+[/list]
+
+[size=4][b]Installation[/b][/size]
+[list=1]
+[*]You need an ASI loader. If you use DMM, you already have one.
+[*][b]DMM:[/b] add [i]MouseWindowFixes.asi[/i] as an ASI mod and enable it.
+[b]Manual:[/b] put [i]MouseWindowFixes.asi[/i] in [i]Crimson Desert\bin64[/i].
+[/list]
+To uninstall, remove (or disable) the file.
+
+[size=4][b]Game updates[/b][/size]
+The mod finds everything it needs by searching the game's code when it starts, so updates rarely break it. If one search fails after a patch, only that fix switches off and the rest keep working. [i]MouseWindowFixes.log[/i] in [i]bin64[/i] says which.
+
+[size=4][b]Compatibility[/b][/size]
+Works alongside other ASI mods, including Outfit Manager. Only affects mouse and keyboard; controllers are untouched.
+
+[size=4][b]Credits[/b][/size]
+[list]
+[*]MinHook by Tsuda Kageyu (BSD 2-Clause), licence included in the download.
+[/list]
