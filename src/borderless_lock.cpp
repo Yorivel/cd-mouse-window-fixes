@@ -167,7 +167,15 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         g_block_layer = !capturing || repeated ? layer : -1;
         LOG("the game released the mouse itself (input layer %u)%s", layer,
             !capturing ? "" : repeated ? ": again and again, left free until the layer changes" : ": overridden");
-        g_freed_once = true;
+        if (!g_freed_once.exchange(true) && g_main) { // (the title prompts: the cursor starts in the middle, v17)
+            RECT r{};
+            if (GetClientRect(g_main, &r)) {
+                POINT c{(r.left + r.right) / 2, (r.top + r.bottom) / 2};
+                ClientToScreen(g_main, &c);
+                SetCursorPos(c.x, c.y);
+                LOG("title prompts: cursor centred at %ld,%ld", c.x, c.y);
+            }
+        }
         if (g_hud_ret && ret == g_hud_ret && layer == 4 && g_main) { // (the HUD appearing in the world: see 5.)
             LOG("  (the HUD appeared: camera mode back on the next frame)");
             g_blank = true;
@@ -377,6 +385,10 @@ UINT WINAPI rid_hook(HRAWINPUT h, UINT cmd, LPVOID data, PUINT size, UINT header
         __try {
             auto in = static_cast<RAWINPUT*>(data);
             if (in->header.dwType == RIM_TYPEMOUSE && (in->data.mouse.usButtonFlags & RI_MOUSE_WHEEL)) {
+                // (v17 test: one notch at double strength - the game zooms only after a second notch within a short
+                // window; does it count strength or events?)
+                SHORT d = static_cast<SHORT>(in->data.mouse.usButtonData);
+                if (d == WHEEL_DELTA || d == -WHEEL_DELTA) in->data.mouse.usButtonData = static_cast<USHORT>(d * 2);
                 static HRAWINPUT last = nullptr;
                 static int reads = 0;
                 reads = h == last ? reads + 1 : 1;
@@ -661,7 +673,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v16 (wheel DIAG) started");
+    LOG("Borderless Lock v17 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
