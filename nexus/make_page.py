@@ -101,11 +101,26 @@ art.SECTIONS = [
         ('credit', 'Tsuda Kageyu', 'MinHook, the hooking library (BSD 2-Clause licence, included)',
          'https://github.com/TsudaKageyu/minhook'),
         ('credit', 'Friedrich Althausen', 'Vollkorn, the game\'s UI font, used for these headings', None),
-        ('links', [('Source code', None, 'Files tab, under Miscellaneous')]),
+        ('links', [('GitHub', 'https://github.com/Yorivel/cd-mouse-window-fixes', 'source and releases'),
+                   ('Source code', None, 'Files tab, under Miscellaneous')]),
     ]),
 ]
 
 art.header = header
 
+RAW = 'https://raw.githubusercontent.com/Yorivel/cd-mouse-window-fixes/main/nexus/out/'
+
+
+def write_final():
+    """description.final.bbcode.txt: the placeholders swapped for the images' links in this (public) repo."""
+    text = open(os.path.join(HERE, 'description.bbcode.txt'), encoding='utf-8').read()
+    for key in ['header', 'glance'] + ['sep_' + k for k, _, _ in art.SECTIONS]:
+        text = text.replace(key.upper() + '_URL', RAW + key + '.png')
+    assert '_URL[' not in text, 'placeholder left'
+    with open(os.path.join(HERE, 'description.final.bbcode.txt'), 'w', encoding='utf-8') as f:
+        f.write(text)
+
+
 if __name__ == '__main__':
     art.main()
+    write_final()

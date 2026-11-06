@@ -55,5 +55,5 @@ Tested on Crimson Desert 1.0.0.3576 in borderless mode at 2560x1440.
 [b][url=https://github.com/TsudaKageyu/minhook]Tsuda Kageyu[/url][/b]  [color=#cb9349]·[/color]  MinHook, the hooking library (BSD 2-Clause licence, included)
 [b]Friedrich Althausen[/b]  [color=#cb9349]·[/color]  Vollkorn, the game's UI font, used for these headings
 
-[b]Source code[/b]  Files tab, under Miscellaneous
+[b][url=https://github.com/Yorivel/cd-mouse-window-fixes]GitHub[/url][/b]  source and releases   [color=#cb9349]·[/color]   [b]Source code[/b]  Files tab, under Miscellaneous
 [/center]
