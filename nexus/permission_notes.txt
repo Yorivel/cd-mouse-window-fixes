@@ -1,0 +1,1 @@
+The mod is open source under the MIT licence (source code on GitHub and in the Files tab): you may use, change, fix, port and re-upload it, also as part of a collection or a modpack, as long as the licence and the credit come along. A link back to this page is appreciated. The MIT licence covers the mod's own work only, not the game's content.

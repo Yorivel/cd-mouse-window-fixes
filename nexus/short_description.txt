@@ -1,0 +1,1 @@
+Fixes for playing in borderless mode with mouse and keyboard. No accidental resize from the window corner, no Windows arrow flashing over the game, no stuck menu cursor after loading in or Alt+Tab (the camera turns right away), a proper title screen cursor, and every wheel notch zooms. One ASI file, no game files changed.
