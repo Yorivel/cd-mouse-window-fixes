@@ -195,7 +195,10 @@ void __fastcall release_hook(UPTR obj, U64 pos)
                 // (v20: on the title logo's ring - measured at 716,381 on a 1366x768 screenshot: the logo scales with
                 // the height, so the offset from the middle is in heights: +0.043 across, 0.496 down)
                 LONG W = r.right - r.left, H = r.bottom - r.top;
-                *sx = r.left + W / 2 + LONG(H * 0.043), *sy = r.top + LONG(H * 0.496);
+                // (v21: the title shows Windows' arrow, whose point is its tip and whose body hangs down-right of it:
+                // shifted up-left by about half the arrow - 17% / 30% of the cursor size - so the arrow covers the ring)
+                LONG cx = GetSystemMetrics(SM_CXCURSOR), cy = GetSystemMetrics(SM_CYCURSOR);
+                *sx = r.left + W / 2 + LONG(H * 0.043) - LONG(cx * 0.17), *sy = r.top + LONG(H * 0.496) - LONG(cy * 0.30);
                 LOG("the cursor's first spot: the title ring (%ld,%ld)", static_cast<long>(*sx), static_cast<long>(*sy));
             }
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -705,7 +708,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v20 started");
+    LOG("Borderless Lock v21 started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
