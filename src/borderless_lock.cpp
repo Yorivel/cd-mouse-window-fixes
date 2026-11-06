@@ -149,7 +149,7 @@ void __fastcall release_hook(UPTR obj, U64 pos)
         static ULONGLONG times[3] = {};
         ULONGLONG now = GetTickCount64();
         times[0] = times[1], times[1] = times[2], times[2] = now;
-        bool capturing = layer <= 5 && ((0x2B >> layer) & 1);
+        bool capturing = false; // (v11: none overridden - layer 1 turned out to be the title screen; layers being mapped)
         bool repeated = capturing && times[0] && now - times[0] < 2000;
         g_block_layer = !capturing || repeated ? layer : -1;
         LOG("the game released the mouse itself (input layer %u)%s", layer,
@@ -277,7 +277,18 @@ void __fastcall input_hook(UPTR self)
     { // DIAG (v9): F10 = snapshot
         static bool was = false;
         bool down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-        if (down && !was) snapshot(self);
+        if (down && !was) { // (v11: a marker: the user presses it at each screen, to map the layers)
+            static int n = 0;
+            std::uint8_t layer = 0xFF, rel = 0xFF;
+            read_u8(self + kOffLayer, layer);
+            UPTR ctrl = g_mouse.load();
+            if (ctrl) read_u8(ctrl + kOffReleased, rel);
+            CURSORINFO ci{sizeof ci};
+            GetCursorInfo(&ci);
+            LOG("MARKER %d: input layer %u, mouse %s, Windows cursor %s", ++n, layer,
+                rel == 1 ? "free (cursor mode)" : rel == 0 ? "captured (camera mode)" : "unknown",
+                (ci.flags & CURSOR_SHOWING) ? "showing" : "hidden");
+        }
         was = down;
     }
     std::uint8_t layer = 0xFF, flag = 0, released = 0, cfg_on = 0;
@@ -306,7 +317,7 @@ void __fastcall input_hook(UPTR self)
     bool focused = false;
     if (call_capture(ctrl, focused) && focused) {
         LOG("camera mode restored (gameplay input layer %u, the mouse was free)", layer);
-        if (layer == 1) g_kick = true; // (the next frame: from the UI pointer layer to gameplay)
+        // (v11: no layer kick: layer 1 is the title screen)
     }
 }
 
@@ -502,7 +513,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v10 (F10 snapshots) started");
+    LOG("Borderless Lock v11 (F10 markers) started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
