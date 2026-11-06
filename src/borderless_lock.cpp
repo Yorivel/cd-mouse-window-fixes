@@ -317,6 +317,22 @@ void __fastcall input_hook(UPTR self)
     }
     std::uint8_t layer = 0xFF, flag = 0, released = 0, cfg_on = 0;
     if (!read_u8(self + kOffLayer, layer)) return;
+    { // DIAG (v16): the input function's second value (+0x32, picked from 18 flags at +0x41) and its last-frame
+      // copy (+0x31): when they change the game rebuilds its key mapping; a wheel notch lost there would explain
+      // the missed zooms
+        static int last_sub = -2, last_31 = -2;
+        std::uint8_t sub = 0xFF, b31 = 0xFF, f[18] = {};
+        read_u8(self + 0x32, sub);
+        read_u8(self + 0x31, b31);
+        if (sub != last_sub || b31 != last_31) {
+            for (int i = 0; i < 18; ++i) read_u8(self + 0x41 + i, f[i]);
+            char fl[64] = "";
+            for (int i = 0; i < 18; ++i) fl[i] = f[i] ? char('0' + (f[i] > 9 ? 9 : f[i])) : '.';
+            fl[18] = 0;
+            LOG("DIAG input +32 %d -> %u, +31 %d -> %u (flags +41..: %s)", last_sub, sub, last_31, b31, fl);
+            last_sub = sub, last_31 = b31;
+        }
+    }
     static int last_layer = -2;
     if (layer != last_layer) {
         std::uint8_t f[7] = {};
@@ -645,7 +661,7 @@ DWORD WINAPI init_thread(LPVOID)
     std::wstring path = buf;
     path.resize(path.find_last_of(L"/\\") + 1);
     logx::open((path + L"BorderlessLock.log").c_str());
-    LOG("Borderless Lock v15 (wheel DIAG) started");
+    LOG("Borderless Lock v16 (wheel DIAG) started");
     if (MH_Initialize() != MH_OK) {
         LOG("MinHook failed: inactive");
         return 0;
